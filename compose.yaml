@@ -1,23 +1,66 @@
 name: plate-module-vms
+
+x-service: &service
+  env_file:
+    - path: .env
+      required: true
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 75s
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+x-inference: &inference
+  <<: *service
+  environment:
+    PLATE_OCR_ENABLED: "${PLATE_OCR_ENABLED:-true}"
+    PLATE_EVENTS_ENABLED: "${PLATE_EVENTS_ENABLED:-true}"
+    PLATE_BBOX_ENABLED: "${PLATE_BBOX_ENABLED:-true}"
+  volumes:
+    - type: bind
+      source: ./models/weights
+      target: /models
+      read_only: true
+      bind:
+        create_host_path: false
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+
 services:
   plate-sync:
+    <<: *inference
+    profiles: [gpu]
+    image: plate-module-vms:detection-cu128
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gpu
+      args:
+        CUDA_BASE_IMAGE: "${CUDA_BASE_IMAGE:-multi-camera-ai:cu128}"
+    gpus: all
+
+  plate-cpu:
+    <<: *inference
+    profiles: [cpu]
+    image: plate-module-vms:detection-cpu
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cpu
+
+  plate-config:
+    <<: *service
+    profiles: [sync]
     image: plate-module-vms:sync
     build:
       context: .
       dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        required: true
-    init: true
-    restart: unless-stopped
-    stop_grace_period: 15s
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
+      target: sync

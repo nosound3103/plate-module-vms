@@ -1,8 +1,0 @@
-services:
-  plate-sync:
-    image: plate-module-vms:detection-cu128
-    build:
-      target: gpu
-      args:
-        CUDA_BASE_IMAGE: multi-camera-ai:cu128
-    gpus: all

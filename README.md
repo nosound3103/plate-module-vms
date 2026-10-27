@@ -14,11 +14,9 @@ thống nhận diện phương tiện và biển số trong VMS.
 - Đọc RTSP với queue một frame/camera, tự reconnect khi mất stream.
 - Detect xe bằng một model dùng chung, xử lý camera luân phiên.
 
-Hai chế độ vận hành: `sync` đồng bộ cấu hình; `detection` bổ sung đọc RTSP và
-detect xe. Có thể bật worker nhận diện biển số trong chế độ detection bằng
-`compose.plate.yaml`. Bật tracking qua vạch và publish event PLATE bằng
-`compose.events.yaml`. Thêm `compose.bbox.yaml` để publish khung xe, khung biển số
-và text OCR realtime qua MQTT.
+Một file `compose.yaml` cung cấp ba profile: `gpu`, `cpu`, `sync`. Profile GPU/CPU
+chạy detection; các cờ môi trường bật OCR, event IN/OUT và bbox realtime.
+Profile sync chỉ đồng bộ cấu hình camera/vạch.
 
 ## Yêu cầu
 
@@ -55,21 +53,71 @@ Mỗi instance chạy song song cần client ID khác nhau.
 
 ## Khởi chạy
 
-Tại thư mục dự án:
+Tại thư mục dự án, chạy GPU:
 
 ```powershell
-docker compose up -d --build
-docker compose logs -f --tail 100 plate-sync
+docker compose --profile gpu up -d --build
+docker compose --profile gpu logs -f --tail 100 plate-sync
 ```
 
 Dừng service:
 
 ```powershell
-docker compose down
+docker compose --profile gpu down
 ```
 
-Runtime sync sử dụng Python 3.12 và Paho MQTT. Container chạy với user không có
-quyền root, filesystem read-only và log rotation. Workflow sync không yêu cầu GPU.
+Chọn đúng một profile mỗi lần triển khai:
+
+| Profile | Service | Chức năng |
+|---|---|---|
+| `gpu` | `plate-sync` | Inference với CUDA, dùng image CUDA đã có |
+| `cpu` | `plate-cpu` | Inference bằng CPU, không yêu cầu GPU |
+| `sync` | `plate-config` | Chỉ đồng bộ MQTT, không mở RTSP hoặc load model |
+
+```powershell
+docker compose --profile cpu up -d --build
+docker compose --profile cpu logs -f --tail 100 plate-cpu
+```
+
+Chỉ đồng bộ cấu hình:
+
+```powershell
+docker compose --profile sync up -d --build
+docker compose --profile sync logs -f --tail 100 plate-config
+```
+
+Khi đổi profile, dừng profile đang chạy trước bằng `docker compose --profile
+<profile-hiện-tại> down`. Không bật nhiều profile cùng lúc để tránh nhiều instance
+xử lý cùng camera. Lệnh không chỉ định profile sẽ không chọn service nào.
+
+Container chạy với user không có quyền root, filesystem read-only và log rotation.
+Runtime sync chỉ cần Python 3.12/Paho MQTT; CPU/GPU mount weight read-only.
+
+Một `Dockerfile` chứa ba build target `sync`, `cpu`, `gpu`. Compose profile chọn
+đúng target; không cần chọn Dockerfile khác hoặc tự truyền `--target` khi dùng
+Compose. Target sync chỉ cài MQTT, target CPU cài Torch CPU, target GPU dùng
+Torch/CUDA từ base image đã cấu hình. Các target độc lập nên build GPU không cài
+Torch CPU. Khi build trực tiếp bằng Docker, luôn chỉ định `--target` mong muốn.
+
+### Bật/tắt tính năng
+
+Để chạy đầy đủ pipeline, đặt trong `.env`:
+
+```dotenv
+PLATE_OCR_ENABLED=true
+PLATE_EVENTS_ENABLED=true
+PLATE_BBOX_ENABLED=true
+```
+
+Nếu chỉ detect xe, đặt cả ba cờ `false`. Nếu chỉ OCR và bbox, đặt OCR/bbox `true`,
+event `false`. Event và bbox đều yêu cầu OCR bật. Profile sync không sử dụng các
+cờ AI. Với profile CPU/GPU, Compose mặc định ba cờ là `true` khi biến chưa được
+khai báo; giá trị có sẵn trong `.env` được giữ nguyên, kể cả `false`.
+
+Khi chuyển từ cấu hình nhiều file Compose, kiểm tra ba cờ trên: cấu hình cũ có
+thể đã đặt `false` và được overlay ghi đè khi chạy. Cấu hình hiện tại lấy giá trị
+trực tiếp từ biến môi trường hoặc `.env`. Sau khi đổi cờ, chạy lại lệnh `up -d`.
+Bỏ khai báo `PLATE_DEVICE` để profile dùng device mặc định của image.
 
 ## Vehicle detection
 
@@ -85,19 +133,20 @@ Model mặc định có hai lớp `CAR`, `MOTORBIKE`, input 640, confidence 0.4 
 Chạy CPU:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml up -d --build
+docker compose --profile cpu up -d --build
 ```
 
 Chạy GPU với image CUDA `multi-camera-ai:cu128` có sẵn trên máy:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml up -d --build
+docker compose --profile gpu up -d --build
 ```
 
 Image GPU dùng Torch `2.10.0+cu128` và Torchvision `0.25.0+cu128`; build kiểm
 tra cặp phiên bản trước khi cài dependency ứng dụng. Image CPU cài cặp tương
 ứng `2.10.0+cpu` / `0.25.0+cpu`. Weight được mount read-only vào `/models`,
-không nằm trong image. Tên service Compose vẫn là `plate-sync` ở cả hai chế độ.
+không nằm trong image. Service GPU là `plate-sync`, CPU là `plate-cpu`.
+Đổi base image GPU bằng biến build `CUDA_BASE_IMAGE` nếu cần.
 
 Dependency GPU bổ sung khóa tương thích `contourpy==1.3.3` trong
 `requirements-cuda-compat.lock` để dùng cùng NumPy 1.26.4. Build chạy kiểm tra
@@ -106,7 +155,7 @@ dependency sau khi cài; Torch và Torchvision giữ nguyên phiên bản trong 
 Theo dõi detection:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml logs -f --tail 100 plate-sync
+docker compose --profile gpu logs -f --tail 100 plate-sync
 ```
 
 Log `Detection model loaded`, `RTSP connected` và `Vehicle detection` xác nhận
@@ -199,23 +248,22 @@ chung device với vehicle detection. Không cần cài thêm dependency cho OCR
 Chạy CPU với nhận diện:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.plate.yaml up -d --build
+docker compose --profile cpu up -d --build
 ```
 
 Chạy GPU với nhận diện:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.plate.yaml up -d --build
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.plate.yaml logs -f --tail 100 plate-sync
+docker compose --profile gpu up -d --build
+docker compose --profile gpu logs -f --tail 100 plate-sync
 ```
 
-`compose.plate.yaml` đặt `PLATE_OCR_ENABLED=true`, ưu tiên hơn giá trị trong
-`env_file`. Khi không dùng overlay Compose này, có thể bật OCR trực tiếp bằng
-biến môi trường. `.env` chỉ cần thông tin MQTT/VMS đã cấu hình; OCR có mặc định.
+OCR bật khi `PLATE_OCR_ENABLED=true`. Profile CPU/GPU dùng các cờ trong `.env`;
+không cần file Compose bổ sung cho từng tính năng.
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `PLATE_OCR_ENABLED` | `false` | Bật worker trong chế độ detection |
+| `PLATE_OCR_ENABLED` | `true` trong Compose | Bật worker trong chế độ detection |
 | `PLATE_PLATE_CONFIDENCE` | `0.55` | Ngưỡng detect biển |
 | `PLATE_CHARACTER_CONFIDENCE` | `0.35` | Ngưỡng detect ký tự |
 | `PLATE_ATTRIBUTE_CONFIDENCE` | `0.5` | Ngưỡng nhận thuộc tính |
@@ -287,20 +335,18 @@ trường này. Chế độ chỉ bật OCR không publish sự kiện. Bật wo
 Chạy GPU với detect xe, OCR và sự kiện:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml up -d --build
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml logs -f --tail 100 plate-sync
+docker compose --profile gpu up -d --build
+docker compose --profile gpu logs -f --tail 100 plate-sync
 ```
 
 Chạy CPU:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.events.yaml up -d --build
+docker compose --profile cpu up -d --build
 ```
 
-`compose.events.yaml` bật cả `PLATE_OCR_ENABLED` và `PLATE_EVENTS_ENABLED`, nên
-không cần thêm `compose.plate.yaml`. Giá trị trong overlay Compose ưu tiên hơn
-`env_file`. Với cấu hình MQTT/VMS đã có, các tùy chọn mới dùng mặc định và không
-cần sửa `.env`. Broker cần cho phép publish `smart_vms/ai_events/PLATE`.
+Đặt `PLATE_OCR_ENABLED=true` và `PLATE_EVENTS_ENABLED=true` để bật sự kiện.
+Broker cần cho phép publish `smart_vms/ai_events/PLATE`.
 
 ### Tracking và xác định hướng
 
@@ -388,14 +434,14 @@ vật lý trên mọi lần chạy. `entity_id`/`payload.object_key` ổn địn
 
 Queue chỉ ở RAM, không khôi phục sau restart. TTL pending chỉ áp dụng trước khi
 Paho nhận bản tin; bản tin đã nhận có thể được gửi lại khi reconnect sau TTL.
-Shutdown báo số pending chưa gửi; Compose cho phép tối đa 60 giây để dừng các
+Shutdown báo số pending chưa gửi; Compose cho phép tối đa 75 giây để dừng các
 worker. Không tạo sự kiện giả khi khởi động. Bbox realtime thuộc workflow riêng.
 
 ### Cấu hình sự kiện
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `PLATE_EVENTS_ENABLED` | `false` | Bật passage worker; yêu cầu OCR bật |
+| `PLATE_EVENTS_ENABLED` | `true` trong Compose | Bật passage worker; yêu cầu OCR bật |
 | `PLATE_TRACK_TTL_SECONDS` | `2` | Giữ track khi mất detection |
 | `PLATE_MAX_TRACKS` | `128` | Số track tối đa/camera |
 | `PLATE_CROSSING_DEADBAND` | `0.01` | Khoảng cách chuẩn hóa quanh vạch |
@@ -418,14 +464,13 @@ network acknowledgement.
 Chạy đầy đủ detection, OCR, sự kiện qua vạch và bbox trên GPU:
 
 ```powershell
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml -f compose.bbox.yaml up -d --build
-docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml -f compose.bbox.yaml logs -f --tail 100 plate-sync
+docker compose --profile gpu up -d --build
+docker compose --profile gpu logs -f --tail 100 plate-sync
 ```
 
-Với CPU, bỏ `-f compose.gpu.yaml`. Nếu chỉ cần bbox/OCR và không gửi sự kiện qua
-vạch, bỏ `-f compose.events.yaml` và giữ `PLATE_EVENTS_ENABLED=false` trong env.
-`compose.bbox.yaml` bật OCR và bbox, không đặt lại cờ sự kiện. Các biến bbox có
-mặc định nên không cần sửa `.env` để khởi chạy workflow này.
+Với CPU, dùng `--profile cpu`. Đặt `PLATE_OCR_ENABLED=true` và
+`PLATE_BBOX_ENABLED=true` để bật overlay. Nếu không gửi sự kiện qua vạch, đặt
+`PLATE_EVENTS_ENABLED=false`. Các tính năng dùng chung một file Compose.
 
 ### Payload overlay
 
@@ -499,7 +544,7 @@ hoạt động khi chưa có vạch; khi đó không có lượt IN/OUT để t�
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `PLATE_BBOX_ENABLED` | `false` | Bật worker bbox, yêu cầu OCR bật |
+| `PLATE_BBOX_ENABLED` | `true` trong Compose | Bật worker bbox, yêu cầu OCR bật |
 | `PLATE_BBOX_MAX_FPS` | `10` | Giới hạn publish/camera |
 | `PLATE_BBOX_MAX_FRAME_AGE_SECONDS` | `0.3` | Hạn frame overlay |
 | `PLATE_BBOX_PLATE_MAX_AGE_SECONDS` | `1` | Hạn khung/text biển từ frame OCR |
@@ -518,7 +563,7 @@ nối. Mỗi lần publish có `topic`, `camera`, `object_key=frame:<sequence>` 
 - `DROPPED_RC_*` / `DROPPED_<error>`: lỗi gửi, không retry bản tin cũ.
 
 QoS 0 không có PUBACK. Log từng bản tin có thể tăng dung lượng khi nhiều camera;
-Compose đã bật log rotation. Overlay bbox đặt thời gian dừng container 75 giây
+Compose đã bật log rotation và đặt thời gian dừng container 75 giây
 để dừng worker bbox, tracking, OCR, detection và sync theo thứ tự.
 
 ## Luồng đồng bộ

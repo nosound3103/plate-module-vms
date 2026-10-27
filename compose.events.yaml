@@ -1,6 +1,0 @@
-services:
-  plate-sync:
-    stop_grace_period: 60s
-    environment:
-      PLATE_OCR_ENABLED: "true"
-      PLATE_EVENTS_ENABLED: "true"

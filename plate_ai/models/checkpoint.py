@@ -13,4 +13,6 @@ class Unpickler(pickle.Unpickler):
             return Path
         if module in {"models.common", "models.yolo", "vehicle.yolo.models.common", "vehicle.yolo.models.yolo"}:
             module = "plate_ai.models.yolov5"
+        if module in {"utils.augmentations", "vehicle.yolo.utils.augmentations"}:
+            module = "plate_ai.models.transforms"
         return super().find_class(module, name)

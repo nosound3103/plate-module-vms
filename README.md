@@ -15,7 +15,8 @@ thống nhận diện phương tiện và biển số trong VMS.
 - Detect xe bằng một model dùng chung, xử lý camera luân phiên.
 
 Hai chế độ vận hành: `sync` đồng bộ cấu hình; `detection` bổ sung đọc RTSP và
-detect xe. OCR, event PLATE và bbox MQTT chưa được bật trong workflow detection.
+detect xe. Có thể bật worker nhận diện biển số trong chế độ detection bằng
+`compose.plate.yaml`. Event PLATE và bbox MQTT chưa được publish.
 
 ## Yêu cầu
 
@@ -106,7 +107,7 @@ Theo dõi detection:
 docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml logs -f --tail 100 plate-sync
 ```
 
-Log `Vehicle model loaded`, `RTSP connected` và `Vehicle detection` xác nhận
+Log `Detection model loaded`, `RTSP connected` và `Vehicle detection` xác nhận
 các giai đoạn vận hành. Log detection gồm camera, số frame, số xe, thời gian
 inference và tuổi frame. `READY` là kết quả còn hạn; `STALE` bị loại khỏi cache.
 Đây là kết quả detect xe, chưa phải nhận diện biển số.
@@ -171,6 +172,113 @@ camera. Lệnh yêu cầu artifact model đã đặt trong `models/weights`:
 ```powershell
 docker run --rm --gpus all --mount "type=bind,source=$($PWD.Path)\tests,target=/tests,readonly" --mount "type=bind,source=$($PWD.Path)\models\weights,target=/models,readonly" plate-module-vms:detection-cu128 /app/.venv/bin/python -m unittest discover -s /tests -v
 ```
+
+## Nhận diện biển số và thuộc tính xe
+
+Pipeline gồm detect xe → crop xe → detect biển số → crop biển → detect ký tự →
+sắp xếp một/hai hàng → chuẩn hóa text `A-Z0-9`. Các giả thuyết ký tự trùng vị trí
+được loại theo confidence. Text được chấp nhận khi dài 6–12 ký tự, có cả chữ và số;
+đây là bộ lọc OCR cơ bản, chưa xác thực quy chuẩn hay đăng ký phương tiện.
+
+Đặt đủ các artifact trong `models/weights`; filename, SHA-256 và input size được
+ghi tại `models/manifest.json`:
+
+| Vai trò | File | Input |
+|---|---|---|
+| Detect biển | `last_plate_n_12012023.pt` | 256 |
+| Đọc ký tự | `last_digit_n_12012022.pt` | 256 |
+| Hãng xe | `brand_v2_320.pt` | 320 |
+| Màu xe | `color_v2_224.pt` | 224 |
+| Màu biển | `last_color_29122022_v2.pt` | 128 |
+
+Loader kiểm tra checksum trước khi giải mã từng checkpoint. Tất cả model dùng
+chung device với vehicle detection. Không cần cài thêm dependency cho OCR.
+
+Chạy CPU với nhận diện:
+
+```powershell
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.plate.yaml up -d --build
+```
+
+Chạy GPU với nhận diện:
+
+```powershell
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.plate.yaml up -d --build
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.plate.yaml logs -f --tail 100 plate-sync
+```
+
+`compose.plate.yaml` đặt `PLATE_OCR_ENABLED=true`, ưu tiên hơn giá trị trong
+`env_file`. Khi không dùng overlay Compose này, có thể bật OCR trực tiếp bằng
+biến môi trường. `.env` chỉ cần thông tin MQTT/VMS đã cấu hình; OCR có mặc định.
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `PLATE_OCR_ENABLED` | `false` | Bật worker trong chế độ detection |
+| `PLATE_PLATE_CONFIDENCE` | `0.55` | Ngưỡng detect biển |
+| `PLATE_CHARACTER_CONFIDENCE` | `0.35` | Ngưỡng detect ký tự |
+| `PLATE_ATTRIBUTE_CONFIDENCE` | `0.5` | Ngưỡng nhận thuộc tính |
+| `PLATE_OCR_INTERVAL_SECONDS` | `0.5` | Khoảng cách tối thiểu giữa lượt xử lý/camera |
+| `PLATE_OCR_MAX_RESULT_AGE_SECONDS` | `2` | Hạn kết quả, tính từ lúc nhận frame |
+| `PLATE_OCR_MAX_VEHICLES` | `16` | Số xe tối đa/lượt, ưu tiên confidence cao |
+| `PLATE_OCR_MAX_PLATES_PER_VEHICLE` | `3` | Số biển ứng viên tối đa/xe |
+
+Đổi artifact bằng `PLATE_<ROLE>_WEIGHT` và `PLATE_<ROLE>_SHA256`, với role
+`PLATE`, `DIGIT`, `BRAND`, `COLOR`, `PLATE_COLOR`. Các model thay thế phải có
+kiến trúc, tên lớp và preprocessing tương thích; input size cố định theo vai trò.
+
+### Worker và vòng đời kết quả
+
+Một worker OCR dùng chung năm model cho tất cả camera, xử lý luân phiên. Worker
+lấy kết quả vehicle detection mới nhất khi đến lượt; không tạo hàng đợi frame
+chờ OCR. Crop luôn lấy từ đúng frame của detection, không ghép bbox cũ với ảnh mới.
+Cache OCR giữ một kết quả/camera, chỉ gồm metadata, không giữ thêm ảnh.
+
+Nếu camera có polygon, chỉ OCR xe có điểm giữa cạnh đáy nằm trong polygon.
+Nếu chỉ có vạch hoặc chưa có polygon, OCR trên toàn frame. Cập nhật camera hoặc
+polygon/vạch vô hiệu hóa kết quả cũ; kết quả đang chạy chỉ được nhận nếu cấu hình
+vẫn khớp và camera vẫn có detection còn hạn.
+
+Worker detection và OCR chạy riêng, nhưng chia sẻ tài nguyên CPU/GPU. Nhiều xe
+hoặc nhiều camera có thể làm giảm FPS; không đảm bảo đồng bộ frame với video Web.
+Kết quả quá hạn bị loại, kể cả khi OCR vừa hoàn thành.
+
+Log `Plate recognition` có camera, sequence, số xe được xử lý, số biển detect,
+số biển đọc được, thời gian inference, tuổi frame và `READY`/`STALE`. Không log
+RTSP source, ảnh hoặc text biển số. `recognized=0` không đồng nghĩa model detect
+biển chưa chạy; cần xem đồng thời `plates`, `vehicles` và các ngưỡng cấu hình.
+
+### Kết quả tích hợp
+
+```python
+from plate_ai.recognition_config import RecognitionSettings
+from plate_ai.recognition_runtime import RecognitionRuntime
+
+# sync và detection là các runtime đang hoạt động trong ứng dụng.
+with RecognitionRuntime(sync, detection, RecognitionSettings()) as recognition:
+    result = recognition.latest("CAM_01")
+    if result is not None:
+        for item in result.vehicles:
+            text = item.license_plate.text
+            plate_bbox = item.license_plate.bbox
+            manufacturer = item.manufacturer
+            color = item.color
+```
+
+Mỗi kết quả có camera, sequence, timestamp nguồn frame, thời điểm nhận frame,
+thời gian xử lý và danh sách xe. `detection_index` liên kết với vị trí xe trong
+kết quả detection cùng sequence; chưa phải track ID. Bbox xe/biển dùng pixel trên
+cùng frame. Không áp bbox OCR của sequence cũ trực tiếp lên frame hiện tại.
+
+`license_plate` gồm text, confidence OCR, bbox, confidence detection, plate_color
+và status: `DETECTED`, `UNREADABLE`, `NOT_DETECTED`. Giữ được bbox ngay cả khi chưa
+đọc ra text. Xe ngoài polygon hoặc vượt giới hạn lượt xử lý không có trong danh
+sách OCR; dùng danh sách detection riêng để hiển thị tất cả xe.
+
+Hãng/màu xe chỉ được phân loại cho `CAR` có text hợp lệ; màu biển được phân loại
+khi đọc được biển. Nhãn dưới ngưỡng trả `None`. Màu `DARK`/`LIGHT` giữ đúng nhãn
+model. Chưa có model `car_type`, số ghế, VIN hoặc chủ xe nên không suy diễn các
+trường này. Workflow này chưa tracking, xác định lượt qua vạch, publish event hay
+publish bbox MQTT; không gửi thử sự kiện khi khởi động worker.
 
 ## Luồng đồng bộ
 

@@ -9,14 +9,21 @@ VEHICLE_TYPES = {"car": "CAR", "motorbike": "MOTORBIKE", "motorcycle": "MOTORBIK
 
 
 @dataclass(frozen=True)
+class ObjectDetection:
+    label: str
+    confidence: float
+    bbox: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
 class VehicleDetection:
     vehicle_type: str
     confidence: float
     bbox: tuple[int, int, int, int]
 
 
-class VehicleDetector:
-    def __init__(self, settings):
+class YoloDetector:
+    def __init__(self, settings, *, class_labels=None):
         from .models import checkpoint
         import torch
         self.settings = settings
@@ -26,11 +33,11 @@ class VehicleDetector:
             raise RuntimeError("CUDA is unavailable; enable GPU access or select PLATE_DEVICE=cpu")
         path = settings.weights_dir/settings.vehicle_weight
         if not path.is_file():
-            raise FileNotFoundError(f"Vehicle weight missing: {settings.vehicle_weight}")
+            raise FileNotFoundError(f"Detection weight missing: {settings.vehicle_weight}")
         with path.open("rb") as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()
             if digest != settings.vehicle_sha256.lower():
-                raise ValueError("Vehicle weight checksum mismatch")
+                raise ValueError("Detection weight checksum mismatch")
             handle.seek(0)
             state = torch.load(handle, map_location="cpu", pickle_module=checkpoint, weights_only=False)
         self.model = (state.get("ema") or state["model"]).float().to(self.device).eval()
@@ -38,14 +45,14 @@ class VehicleDetector:
             if isinstance(layer, torch.nn.Upsample) and not hasattr(layer, "recompute_scale_factor"):
                 layer.recompute_scale_factor = None
         self.names = self.model.names
-        self.classes = {int(k): VEHICLE_TYPES[str(v).lower().strip()] for k, v in
-                        (self.names.items() if isinstance(self.names, dict) else enumerate(self.names))
-                        if str(v).lower().strip() in VEHICLE_TYPES}
+        names = self.names.items() if isinstance(self.names, dict) else enumerate(self.names)
+        self.classes = {int(k): (class_labels[str(v).lower().strip()] if class_labels is not None else str(v))
+                        for k, v in names if class_labels is None or str(v).lower().strip() in class_labels}
         if not self.classes:
-            raise ValueError("Vehicle model has no supported vehicle classes")
+            raise ValueError("Detection model has no supported classes")
         self.stride = max(32, int(self.model.stride.max()))
         self.image_size = ((settings.image_size+self.stride-1)//self.stride)*self.stride
-        LOGGER.info("Vehicle model loaded weight=%s device=%s classes=%s",
+        LOGGER.info("Detection model loaded weight=%s device=%s classes=%s",
                     settings.vehicle_weight, settings.device, ",".join(self.classes.values()))
 
     def detect(self, image):
@@ -90,5 +97,13 @@ class VehicleDetector:
             result = []
             for box, score, identity in zip(boxes.round().cpu().tolist(), scores[keep].cpu().tolist(), classes[keep].cpu().tolist()):
                 if box[2] > box[0] and box[3] > box[1]:
-                    result.append(VehicleDetection(self.classes[identity], float(score), tuple(int(v) for v in box)))
+                    result.append(ObjectDetection(self.classes[identity], float(score), tuple(int(v) for v in box)))
             return tuple(result)
+
+
+class VehicleDetector(YoloDetector):
+    def __init__(self, settings):
+        super().__init__(settings, class_labels=VEHICLE_TYPES)
+
+    def detect(self, image):
+        return tuple(VehicleDetection(d.label, d.confidence, d.bbox) for d in super().detect(image))

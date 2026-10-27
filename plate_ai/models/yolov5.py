@@ -67,3 +67,14 @@ class DetectionModel(nn.Module):
 
 
 Model = DetectionModel
+
+
+class Classify(nn.Module):
+    def forward(self, x):
+        if isinstance(x, list):
+            x = torch.cat(x, dim=1)
+        return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+
+class ClassificationModel(DetectionModel):
+    pass

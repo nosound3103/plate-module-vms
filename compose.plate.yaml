@@ -1,0 +1,4 @@
+services:
+  plate-sync:
+    environment:
+      PLATE_OCR_ENABLED: "true"

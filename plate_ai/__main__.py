@@ -16,9 +16,12 @@ def main():
     try:
         settings = Settings.from_env()
         detection_settings = None
+        recognition_settings = None
         if args.mode == "detection":
             from .detection_config import DetectionSettings
+            from .recognition_config import RecognitionSettings
             detection_settings = DetectionSettings.from_env()
+            recognition_settings = RecognitionSettings.from_env()
     except ValueError as error:
         # Settings errors name the field, never the supplied value.
         logging.basicConfig(level=logging.INFO)
@@ -35,7 +38,10 @@ def main():
             sync = stack.enter_context(CameraSyncService(settings))
             if detection_settings is not None:
                 from .runtime import DetectionRuntime
-                stack.enter_context(DetectionRuntime(sync, detection_settings))
+                detection = stack.enter_context(DetectionRuntime(sync, detection_settings))
+                if recognition_settings.enabled:
+                    from .recognition_runtime import RecognitionRuntime
+                    stack.enter_context(RecognitionRuntime(sync, detection, recognition_settings))
             while not stop.wait(.5):
                 pass
     except Exception as error:

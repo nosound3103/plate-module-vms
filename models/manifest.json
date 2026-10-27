@@ -4,6 +4,39 @@
     "sha256": "1dd3770b89f3517c81e1d1101dd7815b0c0fc4b16741b1769a655168c95673c7",
     "format": "yolov5-detection-checkpoint",
     "image_size": 640,
-    "classes": {"0": "CAR", "1": "MOTORBIKE"}
+    "classes": {
+      "0": "CAR",
+      "1": "MOTORBIKE"
+    }
+  },
+  "plate": {
+    "filename": "last_plate_n_12012023.pt",
+    "sha256": "088c8b789d984b3723be242899015c654373e886cb15801c70c16ff2c5b4a01f",
+    "format": "yolov5-detection-checkpoint",
+    "image_size": 256
+  },
+  "digit": {
+    "filename": "last_digit_n_12012022.pt",
+    "sha256": "acc35369a568e03e062b94dbb28ce5b72be3ab029aea48fdfaa0371f854b56e4",
+    "format": "yolov5-detection-checkpoint",
+    "image_size": 256
+  },
+  "brand": {
+    "filename": "brand_v2_320.pt",
+    "sha256": "0ba727f6a095039c1974e2df3a3034ca9bef41f2fb7ee273183e9ef5929a6ff4",
+    "format": "yolov5-classification-checkpoint",
+    "image_size": 320
+  },
+  "color": {
+    "filename": "color_v2_224.pt",
+    "sha256": "4319bede403672fedef98a9ae013a1d80e2d4751bb5472a36f1d2735d531892a",
+    "format": "yolov5-classification-checkpoint",
+    "image_size": 224
+  },
+  "plate_color": {
+    "filename": "last_color_29122022_v2.pt",
+    "sha256": "b7f882fb023aa75419752fb6e3038f5c0d9a5dfa63d49c1400ddf9d49f0f7a58",
+    "format": "yolov5-classification-checkpoint",
+    "image_size": 128
   }
 }

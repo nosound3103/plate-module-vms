@@ -1,4 +1,6 @@
-"""Signal-aware CLI for the standalone camera-sync workflow."""
+"""Signal-aware CLI for configuration synchronization and vehicle detection."""
+import argparse
+from contextlib import ExitStack
 import logging
 import signal
 import threading
@@ -8,8 +10,15 @@ from .service import CameraSyncService
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("sync", "detection"), default="sync")
+    args = parser.parse_args()
     try:
         settings = Settings.from_env()
+        detection_settings = None
+        if args.mode == "detection":
+            from .detection_config import DetectionSettings
+            detection_settings = DetectionSettings.from_env()
     except ValueError as error:
         # Settings errors name the field, never the supplied value.
         logging.basicConfig(level=logging.INFO)
@@ -22,11 +31,15 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     try:
-        with CameraSyncService(settings):
+        with ExitStack() as stack:
+            sync = stack.enter_context(CameraSyncService(settings))
+            if detection_settings is not None:
+                from .runtime import DetectionRuntime
+                stack.enter_context(DetectionRuntime(sync, detection_settings))
             while not stop.wait(.5):
                 pass
     except Exception as error:
-        logging.getLogger(__name__).error("Camera sync failed type=%s", type(error).__name__)
+        logging.getLogger(__name__).error("Service failed mode=%s type=%s", args.mode, type(error).__name__)
         return 1
     return 0
 

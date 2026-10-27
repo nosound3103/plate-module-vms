@@ -1,0 +1,9 @@
+{
+  "vehicle": {
+    "filename": "last_vehicle_s_07042023_640_hp.pt",
+    "sha256": "1dd3770b89f3517c81e1d1101dd7815b0c0fc4b16741b1769a655168c95673c7",
+    "format": "yolov5-detection-checkpoint",
+    "image_size": 640,
+    "classes": {"0": "CAR", "1": "MOTORBIKE"}
+  }
+}

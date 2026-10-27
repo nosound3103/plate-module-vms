@@ -44,14 +44,19 @@ class Zone:
     points: tuple[tuple[float, float], ...]
 
     @classmethod
-    def parse(cls, data):
+    def parse(cls, data, *, module_scoped=False):
         if not isinstance(data, dict):
             raise ValueError("AI zone must be an object")
         identity = str(data.get("id") or data.get("code") or "")
         if not identity:
             raise ValueError("AI zone needs an id or code")
-        if data.get("is_active") is False or "PLATE" not in modules(data.get("ai_modules", data.get("ai_module"))):
+        if data.get("is_active") is False:
             return None
+        configured_modules = data.get("ai_modules", data.get("ai_module"))
+        if configured_modules is not None and "PLATE" not in modules(configured_modules):
+            return None
+        if configured_modules is None and not module_scoped:
+            raise ValueError("Monitoring zone must declare PLATE")
         points = data.get("points")
         if not isinstance(points, list) or len(points) < 3:
             raise ValueError("PLATE monitoring zone needs at least three normalized points")
@@ -115,7 +120,7 @@ class CrossingLine:
 
 
 class ZoneStore:
-    """Full snapshots replace state; a zone object updates only that zone."""
+    """Apply atomic PLATE snapshots and individual retained-topic updates."""
     def __init__(self):
         self._zones = {}
         self._topic_ids = {}
@@ -123,64 +128,96 @@ class ZoneStore:
 
     @property
     def zones(self):
-        return tuple(self._zones.values())
+        return tuple(self._zones[key] for key in sorted(self._zones))
+
+    def _remove(self, keys):
+        keys = set(keys)
+        for key in keys:
+            self._zones.pop(key, None)
+        self._line_ids.difference_update(keys)
+        for topic, identities in tuple(self._topic_ids.items()):
+            remaining = identities - keys
+            if remaining:
+                self._topic_ids[topic] = remaining
+            else:
+                del self._topic_ids[topic]
+
+    def _clear(self, suffix):
+        if suffix in {"", "PLATE"}:
+            self._remove(self._zones)
+        elif suffix == "PLATE/lines":
+            self._remove(key for key, zone in self._zones.items() if isinstance(zone, CrossingLine))
+        else:
+            kind = "line" if suffix.startswith("PLATE/lines/") else "polygon"
+            identities = self._topic_ids.get(suffix, {(kind, suffix.split("/")[-1])})
+            self._remove(identities)
 
     def apply(self, topic_suffix: str, payload):
-        line_topic = topic_suffix == "PLATE/lines" or topic_suffix.startswith("PLATE/lines/")
-        if payload is None:
-            if not topic_suffix:
-                self._zones.clear()
-                self._topic_ids.clear()
-                self._line_ids.clear()
-            elif topic_suffix == "PLATE/lines":
-                self._zones = {k: z for k, z in self._zones.items() if not isinstance(z, CrossingLine)}
-                self._topic_ids.pop(topic_suffix, None)
-                self._line_ids.clear()
-            else:
-                identities = self._topic_ids.pop(topic_suffix, {topic_suffix.split("/")[-1]})
-                for identity in identities:
-                    self._zones.pop(identity, None)
-                    self._line_ids.discard(identity)
+        if topic_suffix and topic_suffix.split("/")[0] != "PLATE":
             return
-        if isinstance(payload, list) and line_topic:
-            payload = {"lines": payload}
+        module_scoped = bool(topic_suffix)
+        line_topic = topic_suffix == "PLATE/lines" or topic_suffix.startswith("PLATE/lines/")
+        collection_topic = topic_suffix in {"", "PLATE", "PLATE/lines"}
+        if payload is None or payload == {}:
+            self._clear(topic_suffix)
+            return
+        if isinstance(payload, list):
+            if not collection_topic:
+                raise ValueError("Individual geometry topic must contain an object")
+            payload = {"lines" if line_topic else "ai_zones": payload}
         if not isinstance(payload, dict):
             raise ValueError("Zone message must be an object")
         snapshot = "ai_zones" in payload
         line_snapshot = "lines" in payload
-        entries = payload["ai_zones"] if snapshot else payload["lines"] if line_snapshot else [payload]
-        if not isinstance(entries, list):
-            raise ValueError("ai_zones must be an array")
-        parsed = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                raise ValueError("AI zone entries must be objects")
-            is_line = line_topic or line_snapshot or (isinstance(entry, dict) and (
-                entry.get("shape_type") == "line_crossing" or "line" in entry))
-            zone = CrossingLine.parse(entry, module_scoped=line_topic) if is_line else Zone.parse(entry)
-            identity = str(entry.get("id") or entry.get("code"))
-            if identity in parsed:
-                raise ValueError("Duplicate AI zone identity")
-            parsed[identity] = zone
+        if (snapshot or line_snapshot) and not collection_topic:
+            raise ValueError("Individual geometry topic cannot replace a collection")
+        if line_topic and snapshot:
+            raise ValueError("Line topic cannot contain a polygon snapshot")
+        groups = []
         if snapshot:
-            # Retained polygon snapshots can arrive after the dedicated lines
-            # topic. Preserve that authoritative line configuration.
-            dedicated = {k: z for k, z in self._zones.items() if k in self._line_ids}
-            self._zones = {key: value for key, value in parsed.items() if value is not None}
-            self._zones.update(dedicated)
-            self._topic_ids = {topic: identities for topic, identities in self._topic_ids.items()
-                               if topic == "PLATE/lines" or topic.startswith("PLATE/lines/")}
+            groups.append((payload["ai_zones"], False))
+        if line_snapshot:
+            groups.append((payload["lines"], True))
+        if not groups:
+            groups.append(([payload], line_topic))
+        parsed = {}
+        for entries, force_line in groups:
+            if not isinstance(entries, list):
+                raise ValueError("Geometry snapshot must be an array")
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("AI zone entries must be objects")
+                if not collection_topic and not entry.get("id") and not entry.get("code"):
+                    entry = {**entry, "id": topic_suffix.split("/")[-1]}
+                if not collection_topic and str(entry.get("id") or entry.get("code")) != topic_suffix.split("/")[-1]:
+                    raise ValueError("Geometry identity must match its topic")
+                is_line = force_line or entry.get("shape_type") == "line_crossing" or "line" in entry
+                zone = (CrossingLine.parse(entry, module_scoped=module_scoped) if is_line
+                        else Zone.parse(entry, module_scoped=module_scoped))
+                identity = str(entry.get("id") or entry.get("code"))
+                key = ("line" if is_line else "polygon", identity)
+                if key in parsed:
+                    raise ValueError("Duplicate AI geometry identity")
+                parsed[key] = zone
+        # Parse the whole update before modifying live state. Polygon and line
+        # IDs belong to separate namespaces.
+        if snapshot:
+            self._remove(key for key in self._zones if key not in self._line_ids)
+        if line_snapshot:
+            self._remove(key for key, zone in self._zones.items() if isinstance(zone, CrossingLine))
+        if not collection_topic:
+            self._remove(self._topic_ids.get(topic_suffix, set()) - set(parsed))
+        owned = set()
+        for key, zone in parsed.items():
+            if snapshot and not line_snapshot and key in self._line_ids:
+                continue
+            self._remove({key})
+            if zone is not None:
+                self._zones[key] = zone
+                owned.add(key)
+                if line_topic or line_snapshot:
+                    self._line_ids.add(key)
+        if owned:
+            self._topic_ids[topic_suffix] = owned
         else:
-            if line_snapshot:
-                self._zones = {key: value for key, value in self._zones.items() if not isinstance(value, CrossingLine)}
-                self._line_ids.clear()
-            for key, value in parsed.items():
-                if value is None:
-                    self._zones.pop(key, None)
-                    self._line_ids.discard(key)
-                else:
-                    self._zones[key] = value
-                    if line_topic:
-                        self._line_ids.add(key)
-        if topic_suffix:
-            self._topic_ids[topic_suffix] = set(parsed)
+            self._topic_ids.pop(topic_suffix, None)

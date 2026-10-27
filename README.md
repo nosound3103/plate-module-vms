@@ -595,7 +595,8 @@ flowchart LR
 |---|---|---|
 | Publish, QoS 1, không retain | `smart_vms/cameras/getdevice` | `{zone_id, organization_id}` |
 | Subscribe, QoS 1 | `smart_vms/cameras/zone/{zone_id}` | Snapshot camera đầy đủ của zone |
-| Subscribe, QoS 1 | `smart_vms/cameras/{camera_code}/ai_zones/#` | Polygon, vạch và cập nhật retained |
+| Subscribe, QoS 1 | `smart_vms/cameras/{camera_code}/ai_zones` | Snapshot cấu hình tổng hợp |
+| Subscribe, QoS 1 | `smart_vms/cameras/{camera_code}/ai_zones/PLATE/#` | Polygon, vạch PLATE và cập nhật retained |
 
 Camera phải có UUID, `code`, RTSP source hợp lệ, module PLATE và trạng thái
 hoạt động. Chế độ `sync` chỉ giữ metadata; chế độ `detection` mở RTSP của các
@@ -634,14 +635,48 @@ UUID giữa các zone bị từ chối. Cùng UUID thì dùng định nghĩa t�
 nhận để hỗ trợ cập nhật source. Camera bị tắt PLATE trong bản cập nhật mới
 cũng được loại khỏi các bản ghi zone cũ đang chồng lấp.
 
-`ai_zones/PLATE/lines` nhận mảng hoặc object `{"lines": [...]}`. Mỗi vạch có
-id/code và hai điểm chuẩn hóa 0..1; `direction_point` hoặc `direction_vector`
-xác định phía IN. Mặc định phía IN là phía trái của cặp đầu mút có hướng.
-Polygon có ít nhất ba điểm và khai báo `ai_modules: PLATE`.
+### C03 — cập nhật vùng và vạch khi đang chạy
 
-Retained payload rỗng xóa cấu hình tương ứng. Snapshot polygon giữ vạch ở topic
-riêng. Khi reconnect hoặc queue đầy, registry được làm mới và request lại
-snapshot đầy đủ.
+Module nhận cấu hình qua MQTT cho từng camera đủ điều kiện C02. Mỗi bản cập nhật
+hợp lệ tạo snapshot mới cho các worker, không cần khởi động lại container hoặc
+mở lại RTSP. Topic module khác không được áp dụng vào cấu hình PLATE.
+
+Các topic dưới `smart_vms/cameras/{camera_code}/ai_zones`:
+
+| Hậu tố topic | Payload và phạm vi cập nhật |
+|---|---|
+| Không có | `{"ai_zones": [...]}`; phần tử phải khai báo module |
+| `/PLATE` | Mảng hoặc `{"ai_zones": [...]}` thay snapshot polygon; object đơn cập nhật một hình |
+| `/PLATE/{id}` | Object cập nhật một hình; có thể lấy ID từ topic nếu payload thiếu ID |
+| `/PLATE/lines` | Mảng hoặc `{"lines": [...]}` thay toàn bộ vạch; object đơn cập nhật một vạch |
+| `/PLATE/lines/{id}` | Object cập nhật riêng một vạch |
+
+Object collection có thể chứa cả `ai_zones` và `lines`; cả hai được áp dụng
+trong cùng một lần cập nhật. Ở topic PLATE, `ai_modules` có thể bỏ trống vì
+module đã được xác định từ topic; nếu khai báo thì phải chứa `PLATE` để được giữ.
+`is_active: false` loại hình tương ứng. ID polygon và vạch được quản lý riêng.
+
+Polygon có ít nhất ba điểm `{x, y}` chuẩn hóa 0..1 và diện tích khác 0.
+Vạch có ID/code và hai điểm chuẩn hóa 0..1, hai đầu không trùng nhau.
+`direction_point` hoặc `direction_vector` xác định phía IN; mặc định phía IN
+là phía trái của cặp đầu mút có hướng. Khi sửa/xóa vạch, tracking xóa trạng thái
+phía vạch cũ và chỉ dùng detection mới để tránh tạo lượt cắt do đổi cấu hình.
+
+Payload không có byte, chỉ có khoảng trắng, JSON `null` hoặc `{}` xóa cấu hình
+theo phạm vi topic: topic tổng hoặc `/PLATE` xóa toàn bộ PLATE; `/PLATE/lines`
+xóa các vạch; topic có ID chỉ xóa hình tương ứng. `[]` hoặc `{"lines": []}`
+ở topic lines xóa toàn bộ vạch. `{"ai_zones": []}` xóa snapshot polygon và
+các vạch trong snapshot đó, giữ các vạch được cấu hình từ collection lines riêng.
+
+Snapshot polygon đến sau vẫn giữ cấu hình vạch riêng. Payload sai hình học,
+tọa độ ngoài khoảng hoặc ID không khớp topic bị từ chối, giữ cấu hình hợp lệ
+trước đó. Camera/organization khai báo trong envelope phải khớp camera đang nhận.
+Log `PLATE configuration` có số polygon, số vạch, `revision` và kết quả
+`UPDATED`, `UNCHANGED` hoặc `REJECTED_INVALID_GEOMETRY`.
+
+Khi reconnect hoặc queue đầy, registry được làm mới và subscribe lại để nhận
+snapshot retained. Broker/VMS cần lưu retained các topic cấu hình để module có
+thể khôi phục vùng/vạch sau khi kết nối lại.
 
 ## Tích hợp
 

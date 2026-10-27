@@ -7,6 +7,11 @@ import threading
 LOGGER = logging.getLogger(__name__)
 
 
+def camera_zone_topics(code):
+    return [f"smart_vms/cameras/{code}/ai_zones",
+            f"smart_vms/cameras/{code}/ai_zones/PLATE/#"]
+
+
 def create_client(settings, *, client_id):
     """Create a WebSocket TLS client with the service connection policy."""
     import paho.mqtt.client as mqtt
@@ -65,7 +70,7 @@ class MqttTransport:
         with self._lock:
             codes = tuple(self._camera_codes)
         topics = [(f"smart_vms/cameras/zone/{z}", 1) for z in self.settings.zone_ids]
-        topics.extend((f"smart_vms/cameras/{code}/ai_zones/#", 1) for code in codes)
+        topics.extend((topic, 1) for code in codes for topic in camera_zone_topics(code))
         self._subscribe(topics)
         self._connected.set()
         # The service receives this reset before any retained configuration.
@@ -136,13 +141,13 @@ class MqttTransport:
         with self._lock:
             self._camera_codes.add(code)
         if self._connected.is_set():
-            self._subscribe([(f"smart_vms/cameras/{code}/ai_zones/#", 1)])
+            self._subscribe([(topic, 1) for topic in camera_zone_topics(code)])
 
     def unsubscribe_camera(self, code):
         with self._lock:
             self._camera_codes.discard(code)
         if self._connected.is_set():
-            self._client.unsubscribe(f"smart_vms/cameras/{code}/ai_zones/#")
+            self._client.unsubscribe(camera_zone_topics(code))
 
     def request_cameras(self):
         if not self._connected.is_set():

@@ -215,16 +215,30 @@ class CameraSyncService:
         code = parts[2]
         if code not in self._zones:
             return
-        data = json.loads(raw.decode("utf-8")) if raw else None
         suffix = "/".join(parts[4:])
+        if suffix and parts[4] != "PLATE":
+            return
+        if (len(parts) > 7 or (len(parts) == 7 and parts[5] != "lines")
+                or any(not part for part in parts[4:])):
+            return
+        data = json.loads(raw.decode("utf-8")) if raw.strip() else None
         if isinstance(data, dict):
             if data.get("camera_code", code) != code or data.get("camera_id", self._cameras[code].id) != self._cameras[code].id:
                 raise ValueError("Camera mismatch")
-        self._zones[code].apply(suffix, data)
+            if "organization_id" in data and int(data["organization_id"]) != self.settings.organization_id:
+                raise ValueError("Organization mismatch")
+        previous = self._zones[code].zones
+        try:
+            self._zones[code].apply(suffix, data)
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            LOGGER.warning("PLATE configuration camera=%s result=REJECTED_INVALID_GEOMETRY", code)
+            return
         self._publish_state()
         zones = self._zones[code].zones
         lines = sum(isinstance(z, CrossingLine) for z in zones)
-        LOGGER.info("PLATE configuration camera=%s polygons=%d lines=%d", code, len(zones)-lines, lines)
+        LOGGER.info("PLATE configuration camera=%s polygons=%d lines=%d revision=%d result=%s",
+                    code, len(zones)-lines, lines, self.snapshot().revision,
+                    "UPDATED" if zones != previous else "UNCHANGED")
 
     def _reconcile(self, desired):
         for code, previous in tuple(self._cameras.items()):

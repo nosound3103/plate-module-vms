@@ -1,0 +1,37 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python/tool output
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Runtime data and model artifacts (managed outside Git)
+weights/
+*.pt
+*.onnx
+*.engine
+logs/
+snapshots/
+recordings/
+*.log
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+docs/

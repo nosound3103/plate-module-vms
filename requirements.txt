@@ -1,0 +1,2 @@
+# Runtime for the configuration-sync workflow. No AI dependencies yet.
+paho-mqtt==2.1.0

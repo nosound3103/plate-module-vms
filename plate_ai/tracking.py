@@ -84,8 +84,25 @@ class Track:
     event: dict | None = None
     retry_at: float = 0.
     sent: bool = False
+    plate_relative: tuple | None = None
+    plate_seen_at: float = 0.
+    plate_text: str = ""
+    plate_confidence: float = 0.
+    text_confidence: float = 0.
 
-    def remember(self, read):
+    def remember(self, read, received_monotonic=None):
+        if received_monotonic is not None:
+            plate = read.license_plate
+            self.plate_relative = None
+            self.plate_text = plate.text
+            self.plate_confidence = plate.detection_confidence
+            self.text_confidence = plate.confidence
+            self.plate_seen_at = received_monotonic
+            x1, y1, x2, y2 = read.vehicle.bbox
+            if plate.bbox is not None and x2 > x1 and y2 > y1:
+                px1, py1, px2, py2 = plate.bbox
+                self.plate_relative = ((px1-x1)/(x2-x1), (py1-y1)/(y2-y1),
+                                       (px2-x1)/(x2-x1), (py2-y1)/(y2-y1))
         if self.event is not None or self.sent or not read.license_plate.text:
             return
         text = read.license_plate.text

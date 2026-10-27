@@ -7,6 +7,7 @@ import time
 from .domain import Camera, CrossingLine
 from .events import build_plate_event
 from .tracking import VehicleTracker, foot, intersects
+from .bbox import OverlayDetection, OverlaySnapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -20,15 +21,24 @@ class _CameraState:
     lines_changed_at: float = 0.
     history: OrderedDict = field(default_factory=OrderedDict)
     last_ocr_key: tuple | None = None
+    count_in: int = 0
+    count_out: int = 0
+    latest_metadata: object = None
+    visible: dict = field(default_factory=dict)
+    overlay_key: tuple | None = None
 
 
 class PassageRuntime:
     """One metadata controller; inference and network acknowledgements run separately."""
-    def __init__(self, sync_service, detection_runtime, recognition_runtime, settings, *, publish=None):
+    def __init__(self, sync_service, detection_runtime, recognition_runtime, settings, *, publish=None,
+                 emit_events=True):
         self.sync, self.detection, self.recognition = sync_service, detection_runtime, recognition_runtime
         self.settings = settings
+        self.emit_events = emit_events
         self.publish = publish if publish is not None else sync_service.transport.publish_plate_event
         self._states, self._pending = {}, {}
+        self._overlay_lock = threading.Lock()
+        self._overlays = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="plate-passages", daemon=True)
         self._started = False
@@ -40,9 +50,17 @@ class PassageRuntime:
             raise ValueError("Passage runtime requires detection metadata history")
         self._started = True
         self._thread.start()
-        LOGGER.info("PLATE passage worker started ocr_wait_seconds=%.1f max_pending=%d",
-                    self.settings.ocr_wait_seconds, self.settings.max_pending)
+        LOGGER.info("PLATE passage worker started events_enabled=%s ocr_wait_seconds=%.1f max_pending=%d",
+                    self.emit_events, self.settings.ocr_wait_seconds, self.settings.max_pending)
         return self
+
+    def latest_overlay(self, camera_code):
+        with self._overlay_lock:
+            snapshot = self._overlays.get(camera_code)
+        if snapshot is None or self._stop.is_set():
+            return None
+        current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == camera_code), None)
+        return snapshot if current == snapshot.camera else None
 
     def __enter__(self):
         return self.start()
@@ -54,6 +72,7 @@ class PassageRuntime:
         visible = state.tracker.update(metadata)
         key = (metadata.sequence, metadata.received_monotonic)
         state.history[key] = visible
+        state.latest_metadata, state.visible = metadata, visible
         state.last_frame_at = metadata.received_monotonic
         for track in visible.values():
             point = foot(track.box)
@@ -69,11 +88,15 @@ class PassageRuntime:
                     track.line_id = line.id
                     track.crossed_epoch = metadata.captured_at
                     track.crossed_monotonic = metadata.received_monotonic
-                    if len(self._pending) < self.settings.max_pending:
+                    if track.direction == "IN":
+                        state.count_in += 1
+                    else:
+                        state.count_out += 1
+                    if self.emit_events and len(self._pending) < self.settings.max_pending:
                         self._pending[track.object_key] = (state.camera, track)
                         LOGGER.info("PLATE crossing camera=%s object_key=%s line=%s direction=%s result=PENDING_OCR",
                                     state.camera.code, track.object_key, line.id, track.direction)
-                    else:
+                    elif self.emit_events:
                         LOGGER.error("PLATE crossing camera=%s object_key=%s result=DROPPED_PENDING_FULL",
                                      state.camera.code, track.object_key)
                 track.sides[line.id] = (side, point)
@@ -94,7 +117,7 @@ class PassageRuntime:
         for read in result.vehicles:
             track = associations.get(read.detection_index)
             if track is not None:
-                track.remember(read)
+                track.remember(read, result.received_monotonic)
 
     def _flush(self, now):
         for key, (camera, track) in tuple(self._pending.items()):
@@ -125,6 +148,8 @@ class PassageRuntime:
                 for code, state in tuple(self._states.items()):
                     if code not in configs or configs[code].camera != state.camera:
                         del self._states[code]
+                        with self._overlay_lock:
+                            self._overlays.pop(code, None)
                         LOGGER.info("PLATE tracking removed camera=%s", code)
                 for code, config in configs.items():
                     try:
@@ -163,6 +188,20 @@ class PassageRuntime:
             state.history.popitem(last=False)
         self._recognize(state)
         state.tracker.expire(now)
+        metadata = state.latest_metadata
+        if metadata is not None:
+            key = (metadata.sequence, metadata.received_monotonic, state.last_ocr_key)
+            if key == state.overlay_key:
+                return
+            state.overlay_key = key
+            detections = tuple(OverlayDetection(t.object_key, t.id, t.vehicle.vehicle_type, t.vehicle.confidence,
+                                                t.box, t.plate_relative, t.plate_seen_at, t.plate_text,
+                                                t.plate_confidence, t.text_confidence)
+                               for t in state.visible.values())
+            snapshot = OverlaySnapshot(state.camera, metadata.sequence, metadata.captured_at,
+                                       metadata.received_monotonic, detections, state.count_in, state.count_out)
+            with self._overlay_lock:
+                self._overlays[code] = snapshot
 
     def stop(self):
         self._stop.set()
@@ -174,6 +213,8 @@ class PassageRuntime:
                 LOGGER.warning("PLATE passage stopped pending_events=%d result=NOT_PERSISTED", len(self._pending))
             self._pending.clear()
             self._states.clear()
+            with self._overlay_lock:
+                self._overlays.clear()
         else:
             LOGGER.error("PLATE passage shutdown exceeded timeout")
         return stopped

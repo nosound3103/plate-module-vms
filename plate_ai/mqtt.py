@@ -7,17 +7,21 @@ import threading
 LOGGER = logging.getLogger(__name__)
 
 
+def create_client(settings, *, client_id):
+    """Create a WebSocket TLS client with the service connection policy."""
+    import paho.mqtt.client as mqtt
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, transport="websockets")
+    client.ws_set_options(path=settings.websocket_path)
+    client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+    client.username_pw_set(settings.username, settings.password)
+    client.reconnect_delay_set(min_delay=1, max_delay=settings.reconnect_max_seconds)
+    return mqtt, client
+
+
 class MqttTransport:
     def __init__(self, settings):
-        import paho.mqtt.client as mqtt
         self.settings = settings
-        self._mqtt = mqtt
-        self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                   client_id=settings.client_id, transport="websockets")
-        self._client.ws_set_options(path=settings.websocket_path)
-        self._client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
-        self._client.username_pw_set(settings.username, settings.password)
-        self._client.reconnect_delay_set(min_delay=1, max_delay=settings.reconnect_max_seconds)
+        self._mqtt, self._client = create_client(settings, client_id=settings.client_id)
         self._client.max_queued_messages_set(128)
         self._client.max_inflight_messages_set(20)
         self._client.on_connect = self._on_connect

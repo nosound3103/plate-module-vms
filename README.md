@@ -17,7 +17,8 @@ thống nhận diện phương tiện và biển số trong VMS.
 Hai chế độ vận hành: `sync` đồng bộ cấu hình; `detection` bổ sung đọc RTSP và
 detect xe. Có thể bật worker nhận diện biển số trong chế độ detection bằng
 `compose.plate.yaml`. Bật tracking qua vạch và publish event PLATE bằng
-`compose.events.yaml`. Bbox realtime MQTT chưa được publish.
+`compose.events.yaml`. Thêm `compose.bbox.yaml` để publish khung xe, khung biển số
+và text OCR realtime qua MQTT.
 
 ## Yêu cầu
 
@@ -412,7 +413,116 @@ tự ngược lại. `publish` có thể inject callable nhận `(event, *, came
 object_key)` và trả `True` khi đã nhận vào queue. Không block callable để đợi
 network acknowledgement.
 
+## Bbox realtime và text biển số
+
+Chạy đầy đủ detection, OCR, sự kiện qua vạch và bbox trên GPU:
+
+```powershell
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml -f compose.bbox.yaml up -d --build
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml -f compose.bbox.yaml logs -f --tail 100 plate-sync
+```
+
+Với CPU, bỏ `-f compose.gpu.yaml`. Nếu chỉ cần bbox/OCR và không gửi sự kiện qua
+vạch, bỏ `-f compose.events.yaml` và giữ `PLATE_EVENTS_ENABLED=false` trong env.
+`compose.bbox.yaml` bật OCR và bbox, không đặt lại cờ sự kiện. Các biến bbox có
+mặc định nên không cần sửa `.env` để khởi chạy workflow này.
+
+### Payload overlay
+
+Publish `smart_vms/ai/bbox/{camera_code}`, **QoS 0, không retain**,
+`ai_modules: PLATE`, bbox `[x1, y1, x2, y2]` chuẩn hóa trong khoảng 0..1:
+
+```json
+{
+  "camera_code": "CAM_01",
+  "camera_id": "<camera uuid>",
+  "organization_id": 110,
+  "ai_modules": "PLATE",
+  "timestamp": 1793064600.123,
+  "published_at": 1793064600.203,
+  "frame_sequence": 120,
+  "frame_age_ms": 80,
+  "detections": [
+    {"id": "CAM_01_<session>_1", "global_id": "CAM_01_<session>_1", "track_id": 1,
+     "class": "car", "confidence": 0.95, "bbox": [0.1, 0.2, 0.5, 0.8]},
+    {"id": "CAM_01_<session>_1:plate", "global_id": "CAM_01_<session>_1:plate", "track_id": 1,
+     "class": "license_plate: 30A12345", "text": "30A12345", "confidence": 0.91,
+     "text_confidence": 0.94, "bbox": [0.22, 0.67, 0.36, 0.72]}
+  ],
+  "hud": {"text": "IN: 12 | OUT: 8", "display_ms": 350, "color": "#22c55e"}
+}
+```
+
+Khung biển dùng `class` chứa text để client hiển thị được ngay khi chỉ vẽ nhãn
+`class`; `text` và `text_confidence` cũng được gửi riêng. Nếu detect được biển
+nhưng chưa đọc ra text, nhãn là `license_plate`. Xe và biển có cùng `track_id`,
+nhưng `id`/`global_id` của biển có hậu tố `:plate`.
+
+ID xe dùng chung với `entity_id`/`payload.object_key` của sự kiện PLATE. Dữ liệu
+nhận diện lưu trữ vẫn gửi qua topic event; bbox phục vụ overlay. Không tự tạo
+tọa độ map/PDF hoặc dữ liệu heatmap khi chưa có phép ánh xạ.
+
+### Luồng realtime và giới hạn độ trễ
+
+- Một worker bbox lấy snapshot immutable mới nhất từ tracker, mặc định tối đa
+  10 bản tin/giây/camera. Không đợi OCR hoặc sự kiện hoàn thành để gửi khung xe.
+- Bbox dùng kết nối MQTT WebSocket TLS riêng, cùng tài khoản và client ID có hậu
+  tố `-bbox`. Queue sự kiện QoS 1 và config không dùng socket của overlay.
+- Publisher chỉ cho phép một packet overlay chưa gửi xong trên kết nối bbox.
+  Khi socket bận hoặc mất kết nối, bỏ bản tin mới; không tạo queue retry theo frame.
+  Scheduler luân phiên camera bắt đầu để chia lượt khi socket bận.
+- Có thể gửi lại snapshot còn mới giữa hai lần detect để duy trì overlay. Không
+  gửi bbox của frame quá 0.3 giây. Khi hết hạn, mất camera hoặc đổi source, gửi
+  payload `detections: []` để xóa khung nếu trước đó có khung. Payload xóa cũng
+  có thể bị drop; Web tự hết hạn khung nếu không nhận bản tin tiếp theo.
+- Khung biển được lưu tương đối trong crop xe của frame OCR, sau đó chiếu vào
+  bbox xe hiện tại. Đây là phép chiếu theo track xe, chưa phải tracker biển số
+  riêng; có thể lệch khi xe xoay hoặc đổi góc nhìn. Khung/text biển hết hạn sau
+  1 giây tính từ frame OCR. OCR mới tiếp tục cập nhật overlay sau khi event đã gửi.
+
+`timestamp` là thời điểm AI nhận frame sau decode, không phải PTS camera hay
+thời điểm video được phát trên Web. `published_at`, `frame_sequence`,
+`frame_age_ms` giúp quan sát độ trễ; VMS có thể bỏ qua các field bổ sung này.
+Các biện pháp trên giảm backlog tại AI, không đảm bảo khớp từng frame video qua
+MQTT. Một packet đã đưa xuống socket vẫn có thể đến muộn khi mạng/broker chậm.
+
+Nếu GPU không đạt đủ FPS hoặc OCR chưa hoàn tất trong hạn, khung có thể gián đoạn
+hoặc tạm thời chỉ có khung xe. Chỉ tăng hạn bbox khi chấp nhận hiển thị kết quả cũ
+lâu hơn. Trên VMS, camera phải đang mở, nút phát hiện AI bật, chức năng chọn là
+PLATE và camera đã bật module PLATE.
+
+HUD đếm lượt cắt vạch đầu tiên của mỗi track trong phiên chạy, không phải số event
+đã lưu database. Counter reset khi tạo phiên tracking mới cho camera. Bbox vẫn
+hoạt động khi chưa có vạch; khi đó không có lượt IN/OUT để tăng counter.
+
+### Cấu hình bbox và log
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `PLATE_BBOX_ENABLED` | `false` | Bật worker bbox, yêu cầu OCR bật |
+| `PLATE_BBOX_MAX_FPS` | `10` | Giới hạn publish/camera |
+| `PLATE_BBOX_MAX_FRAME_AGE_SECONDS` | `0.3` | Hạn frame overlay |
+| `PLATE_BBOX_PLATE_MAX_AGE_SECONDS` | `1` | Hạn khung/text biển từ frame OCR |
+| `PLATE_BBOX_TOPIC_PREFIX` | `smart_vms/ai/bbox` | Có thể chọn `smart_vms/bbox` |
+
+Chỉ publish một prefix mỗi instance. Không gửi đồng thời cả hai alias để tránh
+backend chuyển cùng overlay hai lần. Broker cần cho phép client bbox kết nối
+và publish prefix đã chọn. Không cần dependency hay weight bổ sung.
+
+Log `PLATE bbox worker started`, `MQTT bbox connected` xác nhận khởi động và kết
+nối. Mỗi lần publish có `topic`, `camera`, `object_key=frame:<sequence>` và result:
+
+- `QUEUED_QOS0`: Paho đã nhận packet, chưa xác nhận Web đã nhận/vẽ khung.
+- `DROPPED_BUSY`: packet trước chưa gửi xong, bỏ lượt hiện tại.
+- `DROPPED_DISCONNECTED`: client bbox chưa kết nối.
+- `DROPPED_RC_*` / `DROPPED_<error>`: lỗi gửi, không retry bản tin cũ.
+
+QoS 0 không có PUBACK. Log từng bản tin có thể tăng dung lượng khi nhiều camera;
+Compose đã bật log rotation. Overlay bbox đặt thời gian dừng container 75 giây
+để dừng worker bbox, tracking, OCR, detection và sync theo thứ tự.
+
 ## Luồng đồng bộ
+
 
 ```mermaid
 flowchart LR

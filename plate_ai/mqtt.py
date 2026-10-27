@@ -10,11 +10,14 @@ LOGGER = logging.getLogger(__name__)
 def create_client(settings, *, client_id):
     """Create a WebSocket TLS client with the service connection policy."""
     import paho.mqtt.client as mqtt
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, transport="websockets")
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id,
+                         transport="websockets", reconnect_on_failure=True)
     client.ws_set_options(path=settings.websocket_path)
     client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
     client.username_pw_set(settings.username, settings.password)
     client.reconnect_delay_set(min_delay=1, max_delay=settings.reconnect_max_seconds)
+    client.on_connect_fail = lambda *_: LOGGER.warning(
+        "MQTT connection attempt failed client_id=%s; reconnect scheduled", client_id)
     return mqtt, client
 
 
@@ -67,7 +70,7 @@ class MqttTransport:
         self._connected.set()
         # The service receives this reset before any retained configuration.
         self._connect_handler()
-        LOGGER.info("MQTT connected subscriptions=%d", len(topics))
+        LOGGER.info("MQTT connected client_id=%s subscriptions=%d", self.settings.client_id, len(topics))
 
     def _on_disconnect(self, _client, _userdata, _flags, reason_code, _properties):
         self._connected.clear()
@@ -77,6 +80,8 @@ class MqttTransport:
         failures = sum(code.is_failure for code in reason_codes)
         if failures:
             LOGGER.error("MQTT subscription rejected count=%d; check broker ACL", failures)
+        else:
+            LOGGER.info("MQTT subscriptions acknowledged count=%d", len(reason_codes))
 
     def _on_message(self, _client, _userdata, message):
         if len(message.payload) > self.settings.config_max_bytes:

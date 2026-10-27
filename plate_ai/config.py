@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 import math
 import os
-from uuid import uuid4
+import re
 
 
 @dataclass(frozen=True)
@@ -12,7 +12,7 @@ class Settings:
     password: str = field(repr=False)
     organization_id: int
     zone_ids: tuple[int, ...]
-    client_id: str = field(default_factory=lambda: f"plate-sync-{uuid4().hex[:12]}")
+    client_id: str
     broker_port: int = 443
     websocket_path: str = "/mqtt"
     camera_code: str | None = None
@@ -29,8 +29,10 @@ class Settings:
             raise ValueError("MQTT_HOST must be a hostname without a scheme or path")
         if not self.username or not self.password:
             raise ValueError("MQTT_USERNAME and MQTT_PASSWORD are required")
-        if not self.client_id or any(ord(c) < 32 for c in self.client_id):
-            raise ValueError("MQTT_CLIENT_ID must be non-empty without control characters")
+        if self.client_id.lower().startswith("vms_staging_backend"):
+            raise ValueError("MQTT_CLIENT_ID must not start with vms_staging_backend")
+        if not re.fullmatch(r"tts_[A-Za-z0-9][A-Za-z0-9_-]*_01", self.client_id):
+            raise ValueError("MQTT_CLIENT_ID must follow tts_<name>_01; name must start with a letter or digit and contain only letters, digits, underscores or hyphens")
         if self.organization_id <= 0 or not self.zone_ids or any(z <= 0 for z in self.zone_ids):
             raise ValueError("VMS_ORGANIZATION_ID and VMS_ZONE_IDS must contain positive IDs")
         if not 1 <= self.broker_port <= 65535:
@@ -48,6 +50,10 @@ class Settings:
             raise ValueError("VMS_CAMERA_CODE must be a single MQTT topic segment")
         if self.log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR or CRITICAL")
+
+    @property
+    def bbox_client_id(self):
+        return f"{self.client_id[:-3]}_bbox_01"
 
     @classmethod
     def from_env(cls, environ=None):
@@ -78,7 +84,7 @@ class Settings:
             password=read("MQTT_PASSWORD", strip=False),
             organization_id=number("VMS_ORGANIZATION_ID", int, default="0"),
             zone_ids=zone_ids,
-            client_id=read("MQTT_CLIENT_ID", default=f"plate-sync-{uuid4().hex[:12]}"),
+            client_id=read("MQTT_CLIENT_ID"),
             broker_port=number("MQTT_PORT", int, default="443"),
             websocket_path=read("MQTT_WS_PATH", default="/mqtt"),
             camera_code=read("VMS_CAMERA_CODE", default="") or None,

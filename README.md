@@ -42,14 +42,25 @@ Các tùy chọn thường dùng:
 |---|---|---|
 | `MQTT_PORT` | `443` | Cổng WebSocket TLS |
 | `MQTT_WS_PATH` | `/mqtt` | WebSocket path |
-| `MQTT_CLIENT_ID` | Tự sinh | Client ID duy nhất cho mỗi instance |
+| `MQTT_CLIENT_ID` | Bắt buộc | Dạng `tts_<ten>_01`, duy nhất cho mỗi instance; cấm prefix `vms_staging_backend` |
 | `VMS_CAMERA_CODE` | Không giới hạn | Chỉ đồng bộ một camera nếu được đặt |
 | `VMS_CAMERA_SYNC_SECONDS` | `30` | Chu kỳ request cấu hình camera |
 | `LOG_LEVEL` | `INFO` | Mức log |
 
 Settings được validate trước khi kết nối. Python đọc process environment;
 Docker Compose inject `.env`. `.env` không được đưa vào Git hoặc Docker image.
-Mỗi instance chạy song song cần client ID khác nhau.
+Mỗi instance chạy song song cần client ID khác nhau. Ví dụ `MQTT_CLIENT_ID=tts_plate_01`;
+thay `plate` bằng tên riêng của instance. Tên dùng chữ, số, `_`, `-` và bắt đầu
+bằng chữ hoặc số. ID trống hoặc sai định dạng khiến dịch vụ dừng ngay khi khởi động.
+Kết nối bbox dùng `tts_plate_bbox_01`; dành riêng cả hai ID cho instance này.
+
+Cấu hình broker staging: `MQTT_HOST=aioc-stg.atin.vn`, `MQTT_PORT=443`,
+`MQTT_WS_PATH=/mqtt` tương ứng `wss://aioc-stg.atin.vn/mqtt`, có xác thực TLS.
+Khi mất kết nối, client tự thử lại với thời gian chờ tăng từ 1 giây đến
+`MQTT_RECONNECT_MAX_SECONDS`. Sau mỗi lần kết nối thành công, dịch vụ subscribe
+lại topic camera/vùng, làm mới danh sách camera và yêu cầu đồng bộ lại cấu hình.
+Log `MQTT connected` và `MQTT subscriptions acknowledged` cho biết broker đã
+chấp nhận kết nối và subscription; lỗi ACL được log riêng.
 
 ## Khởi chạy
 
@@ -511,8 +522,8 @@ tọa độ map/PDF hoặc dữ liệu heatmap khi chưa có phép ánh xạ.
 
 - Một worker bbox lấy snapshot immutable mới nhất từ tracker, mặc định tối đa
   10 bản tin/giây/camera. Không đợi OCR hoặc sự kiện hoàn thành để gửi khung xe.
-- Bbox dùng kết nối MQTT WebSocket TLS riêng, cùng tài khoản và client ID có hậu
-  tố `-bbox`. Queue sự kiện QoS 1 và config không dùng socket của overlay.
+- Bbox dùng kết nối MQTT WebSocket TLS riêng, cùng tài khoản và client ID dạng
+  `tts_<ten>_bbox_01`. Queue sự kiện QoS 1 và config không dùng socket của overlay.
 - Publisher chỉ cho phép một packet overlay chưa gửi xong trên kết nối bbox.
   Khi socket bận hoặc mất kết nối, bỏ bản tin mới; không tạo queue retry theo frame.
   Scheduler luân phiên camera bắt đầu để chia lượt khi socket bận.

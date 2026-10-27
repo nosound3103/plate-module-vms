@@ -10,7 +10,7 @@ LOGGER = logging.getLogger(__name__)
 class BboxMqttPublisher:
     def __init__(self, settings):
         self.settings = settings
-        self._mqtt, self._client = create_client(settings, client_id=f"{settings.client_id}-bbox")
+        self._mqtt, self._client = create_client(settings, client_id=settings.bbox_client_id)
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._connected = threading.Event()

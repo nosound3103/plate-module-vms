@@ -1,4 +1,4 @@
-"""MQTT WebSocket/TLS transport for camera discovery and zone synchronization."""
+"""MQTT WebSocket/TLS transport for configuration and PLATE event publishing."""
 import json
 import logging
 import ssl
@@ -24,8 +24,11 @@ class MqttTransport:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
         self._client.on_subscribe = self._on_subscribe
+        self._client.on_publish = self._on_publish
         self._connected = threading.Event()
         self._lock = threading.Lock()
+        self._publish_lock = threading.Lock()
+        self._pending_publishes = {}
         self._camera_codes = set()
         self._message_handler = lambda *_: None
         self._connect_handler = lambda: None
@@ -76,6 +79,49 @@ class MqttTransport:
             LOGGER.warning("Configuration message rejected result=PAYLOAD_TOO_LARGE")
             return
         self._message_handler(message.topic, bytes(message.payload))
+
+    def _on_publish(self, _client, _userdata, mid, reason_code, _properties):
+        with self._publish_lock:
+            context = self._pending_publishes.pop(mid, None)
+        if context is not None:
+            camera_code, object_key = context
+            status = "BROKER_REJECTED" if getattr(reason_code, "is_failure", False) else "BROKER_ACK"
+            LOGGER.info("publish topic=smart_vms/ai_events/PLATE camera=%s object_key=%s result=%s mid=%d",
+                        camera_code, object_key, status, mid)
+
+    def publish_plate_event(self, event, *, camera_code, object_key):
+        """Return queue acceptance; PUBACK is logged asynchronously, never awaited."""
+        from .events import PLATE_TOPIC
+        try:
+            body = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        except (ValueError, TypeError):
+            LOGGER.error("publish topic=%s camera=%s object_key=%s result=INVALID_PAYLOAD",
+                         PLATE_TOPIC, camera_code, object_key)
+            return False
+        with self._publish_lock:
+            if not self._connected.is_set():
+                LOGGER.warning("publish topic=%s camera=%s object_key=%s result=DISCONNECTED",
+                               PLATE_TOPIC, camera_code, object_key)
+                return False
+            if len(self._pending_publishes) >= 128:
+                LOGGER.warning("publish topic=%s camera=%s object_key=%s result=QUEUE_FULL",
+                               PLATE_TOPIC, camera_code, object_key)
+                return False
+            try:
+                info = self._client.publish(PLATE_TOPIC, body, qos=1, retain=False)
+            except Exception as error:
+                LOGGER.error("publish topic=%s camera=%s object_key=%s result=FAILED type=%s",
+                             PLATE_TOPIC, camera_code, object_key, type(error).__name__)
+                return False
+            # QoS 1 messages can remain in Paho's outgoing queue if disconnect
+            # races publish(). Retrying these would create another application message.
+            accepted = info.rc in {self._mqtt.MQTT_ERR_SUCCESS, self._mqtt.MQTT_ERR_NO_CONN}
+            if accepted:
+                self._pending_publishes[info.mid] = (camera_code, object_key)
+            status = ("QUEUED" if info.rc == self._mqtt.MQTT_ERR_SUCCESS else "QUEUED_RECONNECT") if accepted else f"REJECTED_RC_{info.rc}"
+            LOGGER.info("publish topic=%s camera=%s object_key=%s result=%s mid=%d",
+                        PLATE_TOPIC, camera_code, object_key, status, info.mid)
+            return accepted
 
     def subscribe_camera(self, code):
         with self._lock:

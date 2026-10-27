@@ -16,7 +16,8 @@ thống nhận diện phương tiện và biển số trong VMS.
 
 Hai chế độ vận hành: `sync` đồng bộ cấu hình; `detection` bổ sung đọc RTSP và
 detect xe. Có thể bật worker nhận diện biển số trong chế độ detection bằng
-`compose.plate.yaml`. Event PLATE và bbox MQTT chưa được publish.
+`compose.plate.yaml`. Bật tracking qua vạch và publish event PLATE bằng
+`compose.events.yaml`. Bbox realtime MQTT chưa được publish.
 
 ## Yêu cầu
 
@@ -277,8 +278,139 @@ sách OCR; dùng danh sách detection riêng để hiển thị tất cả xe.
 Hãng/màu xe chỉ được phân loại cho `CAR` có text hợp lệ; màu biển được phân loại
 khi đọc được biển. Nhãn dưới ngưỡng trả `None`. Màu `DARK`/`LIGHT` giữ đúng nhãn
 model. Chưa có model `car_type`, số ghế, VIN hoặc chủ xe nên không suy diễn các
-trường này. Workflow này chưa tracking, xác định lượt qua vạch, publish event hay
-publish bbox MQTT; không gửi thử sự kiện khi khởi động worker.
+trường này. Chế độ chỉ bật OCR không publish sự kiện. Bật workflow sự kiện dưới
+đây để theo dõi xe qua vạch và gửi nhận diện lên VMS.
+
+## Lượt xe qua vạch và sự kiện PLATE
+
+Chạy GPU với detect xe, OCR và sự kiện:
+
+```powershell
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml up -d --build
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.gpu.yaml -f compose.events.yaml logs -f --tail 100 plate-sync
+```
+
+Chạy CPU:
+
+```powershell
+docker compose -f compose.yaml -f compose.detection.yaml -f compose.events.yaml up -d --build
+```
+
+`compose.events.yaml` bật cả `PLATE_OCR_ENABLED` và `PLATE_EVENTS_ENABLED`, nên
+không cần thêm `compose.plate.yaml`. Giá trị trong overlay Compose ưu tiên hơn
+`env_file`. Với cấu hình MQTT/VMS đã có, các tùy chọn mới dùng mặc định và không
+cần sửa `.env`. Broker cần cho phép publish `smart_vms/ai_events/PLATE`.
+
+### Tracking và xác định hướng
+
+- Mỗi camera có tracker riêng. Ghép xe bằng bài toán assignment theo loại xe,
+  IoU và khoảng cách điểm giữa cạnh đáy, có dự đoán vận tốc.
+- Điểm giữa cạnh đáy bbox phải đổi phía và quỹ đạo phải cắt **đoạn vạch**. Đi qua
+  phần kéo dài của vạch không tạo sự kiện. Deadband giảm rung gần vạch.
+- Vạch lấy từ `ai_zones/PLATE/lines`. Phía IN theo `direction_point` hoặc
+  `direction_vector`; mặc định là phía trái của cặp đầu mút có hướng. Đi vào phía
+  IN tạo `IN`, đi ra tạo `OUT`.
+- Không có vạch thì vẫn detect/OCR, không tạo sự kiện qua vạch. Khi cập nhật vạch,
+  xóa trạng thái phía cũ và chỉ dùng các frame nhận sau cập nhật để xác định lượt mới.
+- Mỗi track chỉ chốt lượt qua vạch đầu tiên, kể cả khi xe quay lại hoặc cắt thêm
+  vạch khác. Thêm camera tự tạo tracker; đổi UUID/source tạo phiên tracking mới.
+
+Lịch sử metadata detection giữ sequence, thời điểm nhận, kích thước ảnh và bbox,
+không giữ frame ảnh. Worker passage đọc các metadata còn hạn, ghép OCR bằng đúng
+`(sequence, received_monotonic, detection_index)` của camera. OCR thiếu lịch sử
+tương ứng bị bỏ qua; không gán sang xe hiện tại theo bbox gần nhất. Mỗi track tích
+lũy tối đa 16 giả thuyết biển, chọn text theo số lượt đọc rồi tổng confidence.
+
+### Chốt và gửi sự kiện
+
+Sau khi cắt vạch, chờ mặc định 2 giây để nhận thêm OCR. Thời gian sự kiện là lúc
+frame đầu tiên xác nhận qua vạch được nhận tại AI, biểu diễn ISO 8601 `+07:00`.
+Payload chỉ được tạo một lần khi hết thời gian chờ, giữ nguyên trong các lần retry.
+Nếu chưa đọc được biển thì text rỗng, status `NOT_DETECTED`; không gửi một sự kiện
+bổ sung cho cùng track khi OCR đến muộn.
+
+Publish lên `smart_vms/ai_events/PLATE`, **QoS 1, không retain**:
+
+```json
+{
+  "ai_modules": "PLATE",
+  "camera_id": "<camera uuid>",
+  "event_time": "2026-10-27T08:30:00.000+07:00",
+  "entity_type": "VEHICLE",
+  "entity_id": "CAM_01_<session>_1",
+  "payload": {
+    "object_key": "CAM_01_<session>_1",
+    "direction": "IN",
+    "confidence": 0.95,
+    "vehicle": {
+      "license_plate": {"text": "30A12345", "status": "DETECTED", "plate_color": "WHITE"},
+      "vehicle_type": "CAR",
+      "car_type": null,
+      "manufacturer": "TOYOTA",
+      "color": "DARK",
+      "total_number_of_seats": null,
+      "chassis_number": null,
+      "owner_name": null
+    }
+  },
+  "snapshot_url": null,
+  "snapshot_base64": null
+}
+```
+
+Biển chỉ nằm ở `payload.vehicle.license_plate.text`, chuẩn hóa `A-Z0-9`. Không gửi
+blacklist/whitelist; VMS tự đối chiếu. Không gửi `violation_type_code` vì workflow
+này chưa có bộ luật phát hiện vi phạm. Các thuộc tính chưa xác định để `null`.
+
+### Queue, retry và log
+
+Pending event giới hạn trên toàn bộ camera. Khi MQTT chưa kết nối hoặc queue đầy,
+retry theo chu kỳ, tối đa đến TTL tính từ lúc qua vạch. Pending đã chốt được giữ
+khi camera bị gỡ hoặc discovery làm mới; việc gỡ camera ngừng tạo lượt mới.
+Khi hết TTL hoặc queue pending đầy, log nêu rõ sự kiện bị loại.
+
+Mỗi lần publish log đủ `topic`, `camera`, `object_key`, `result`:
+
+| Result | Ý nghĩa |
+|---|---|
+| `QUEUED` | Paho nhận bản tin vào outgoing queue |
+| `QUEUED_RECONNECT` | Mất kết nối trong lúc publish; QoS 1 đã được giữ trong queue |
+| `BROKER_ACK` | Đã nhận PUBACK từ broker |
+| `BROKER_REJECTED` | Broker báo không nhận bản tin |
+| `DISCONNECTED` / `QUEUE_FULL` / `REJECTED_RC_*` | Chưa nhận vào queue, worker sẽ retry trong TTL |
+
+`BROKER_ACK` chưa xác nhận VMS đã lưu database. Sau khi Paho nhận bản tin, worker
+không tạo thêm application message cho track đó; Paho tự xử lý truyền lại QoS 1.
+QoS 1 có thể giao bản tin trùng. Tracker cũng có thể mất ID khi che khuất, xe sát
+nhau, mất stream hoặc restart, nên chưa bảo đảm một sự kiện duy nhất cho một xe
+vật lý trên mọi lần chạy. `entity_id`/`payload.object_key` ổn định cho từng track.
+
+Queue chỉ ở RAM, không khôi phục sau restart. TTL pending chỉ áp dụng trước khi
+Paho nhận bản tin; bản tin đã nhận có thể được gửi lại khi reconnect sau TTL.
+Shutdown báo số pending chưa gửi; Compose cho phép tối đa 60 giây để dừng các
+worker. Không tạo sự kiện giả khi khởi động. Bbox realtime thuộc workflow riêng.
+
+### Cấu hình sự kiện
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `PLATE_EVENTS_ENABLED` | `false` | Bật passage worker; yêu cầu OCR bật |
+| `PLATE_TRACK_TTL_SECONDS` | `2` | Giữ track khi mất detection |
+| `PLATE_MAX_TRACKS` | `128` | Số track tối đa/camera |
+| `PLATE_CROSSING_DEADBAND` | `0.01` | Khoảng cách chuẩn hóa quanh vạch |
+| `PLATE_EVENT_OCR_WAIT_SECONDS` | `2` | Chờ OCR sau khi qua vạch |
+| `PLATE_EVENT_PENDING_TTL_SECONDS` | `30` | Hạn retry trước queue acceptance |
+| `PLATE_EVENT_MAX_PENDING` | `128` | Số event chờ trên toàn hệ thống |
+| `PLATE_EVENT_RETRY_SECONDS` | `1` | Chu kỳ retry |
+| `PLATE_TRACK_HISTORY_SECONDS` | `4` | Hạn metadata; phải phủ hạn kết quả OCR |
+| `PLATE_TRACK_HISTORY_FRAMES` | `64` | Số metadata tối đa/camera |
+
+Với tích hợp Python, tạo `DetectionRuntime(..., metadata_frames=64,
+metadata_seconds=4)`, khởi động `RecognitionRuntime`, sau đó khởi động
+`PassageRuntime(sync, detection, recognition, PassageSettings())`. Dừng theo thứ
+tự ngược lại. `publish` có thể inject callable nhận `(event, *, camera_code,
+object_key)` và trả `True` khi đã nhận vào queue. Không block callable để đợi
+network acknowledgement.
 
 ## Luồng đồng bộ
 

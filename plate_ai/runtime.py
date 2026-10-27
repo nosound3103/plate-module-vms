@@ -1,5 +1,6 @@
 """Camera lifecycle supervision and shared round-robin vehicle inference."""
 from dataclasses import dataclass
+from collections import deque
 import logging
 import os
 import threading
@@ -19,6 +20,17 @@ class DetectionResult:
     inference_ms: float
 
 
+@dataclass(frozen=True)
+class DetectionMetadata:
+    camera: Camera
+    sequence: int
+    captured_at: float
+    received_monotonic: float
+    width: int
+    height: int
+    detections: tuple[VehicleDetection, ...]
+
+
 @dataclass
 class _CameraState:
     reader: LatestFrameStream
@@ -33,12 +45,16 @@ class DetectionRuntime:
     the latest frame per camera, preserving matching crops for downstream stages.
     """
     def __init__(self, sync_service, settings, *, detector_factory=VehicleDetector,
-                 stream_factory=LatestFrameStream):
+                 stream_factory=LatestFrameStream, metadata_frames=0, metadata_seconds=4.):
+        if metadata_frames < 0 or metadata_seconds <= 0:
+            raise ValueError("Invalid detection metadata limits")
         self.sync, self.settings = sync_service, settings
         self.detector_factory, self.stream_factory = detector_factory, stream_factory
         self.detector = None
         self._lock = threading.Lock()
         self._states, self._retiring, self._results = {}, {}, {}
+        self._metadata = {}
+        self._metadata_frames, self._metadata_seconds = metadata_frames, metadata_seconds
         self._stop = threading.Event()
         self._controller = threading.Thread(target=self._supervise, name="detection-controller", daemon=True)
         self._inference = threading.Thread(target=self._infer, name="vehicle-inference", daemon=True)
@@ -83,6 +99,17 @@ class DetectionRuntime:
             return result
         return None
 
+    def metadata(self, camera_code):
+        """Recent detection geometry for asynchronous association; no frame images."""
+        now = time.monotonic()
+        with self._lock:
+            return tuple(m for m in self._metadata.get(camera_code, ())
+                         if now-m.received_monotonic <= self._metadata_seconds)
+
+    @property
+    def metadata_enabled(self):
+        return self._metadata_frames > 0
+
     def _supervise(self):
         while not self._stop.is_set():
             desired = {c.camera.code: c.camera for c in self.sync.snapshot().cameras}
@@ -94,6 +121,7 @@ class DetectionRuntime:
                             self._retiring[code] = state.reader
                             del self._states[code]
                             self._results.pop(code, None)
+                            self._metadata.pop(code, None)
                             LOGGER.info("Detection camera removed camera=%s", code)
                     for code, reader in tuple(self._retiring.items()):
                         if not reader.is_alive():
@@ -137,6 +165,13 @@ class DetectionRuntime:
                             continue
                         if age <= self.settings.max_frame_age:
                             self._results[code] = result
+                            if self._metadata_frames:
+                                history = self._metadata.setdefault(code, deque(maxlen=self._metadata_frames))
+                                history.append(DetectionMetadata(result.camera, frame.sequence, frame.captured_at,
+                                                                 frame.received_monotonic, frame.image.shape[1],
+                                                                 frame.image.shape[0], result.detections))
+                                while history and time.monotonic()-history[0].received_monotonic > self._metadata_seconds:
+                                    history.popleft()
                         else:
                             self._results.pop(code, None)
                     if time.monotonic() >= state.next_log_at:
@@ -160,6 +195,7 @@ class DetectionRuntime:
             readers = tuple(s.reader for s in self._states.values())+tuple(self._retiring.values())
             self._states.clear()
             self._results.clear()
+            self._metadata.clear()
             self._retiring.clear()
         for reader in readers:
             reader.request_stop()

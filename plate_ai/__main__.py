@@ -17,11 +17,18 @@ def main():
         settings = Settings.from_env()
         detection_settings = None
         recognition_settings = None
+        passage_settings = None
         if args.mode == "detection":
             from .detection_config import DetectionSettings
             from .recognition_config import RecognitionSettings
+            from .passage_config import PassageSettings
             detection_settings = DetectionSettings.from_env()
             recognition_settings = RecognitionSettings.from_env()
+            passage_settings = PassageSettings.from_env()
+            if passage_settings.enabled and not recognition_settings.enabled:
+                raise ValueError("PLATE_EVENTS_ENABLED requires PLATE_OCR_ENABLED=true")
+            if passage_settings.enabled and passage_settings.history_seconds < recognition_settings.max_result_age:
+                raise ValueError("PLATE_TRACK_HISTORY_SECONDS must cover PLATE_OCR_MAX_RESULT_AGE_SECONDS")
     except ValueError as error:
         # Settings errors name the field, never the supplied value.
         logging.basicConfig(level=logging.INFO)
@@ -38,10 +45,16 @@ def main():
             sync = stack.enter_context(CameraSyncService(settings))
             if detection_settings is not None:
                 from .runtime import DetectionRuntime
-                detection = stack.enter_context(DetectionRuntime(sync, detection_settings))
+                detection = stack.enter_context(DetectionRuntime(
+                    sync, detection_settings,
+                    metadata_frames=passage_settings.history_frames if passage_settings.enabled else 0,
+                    metadata_seconds=passage_settings.history_seconds))
                 if recognition_settings.enabled:
                     from .recognition_runtime import RecognitionRuntime
-                    stack.enter_context(RecognitionRuntime(sync, detection, recognition_settings))
+                    recognition = stack.enter_context(RecognitionRuntime(sync, detection, recognition_settings))
+                    if passage_settings.enabled:
+                        from .passage_runtime import PassageRuntime
+                        stack.enter_context(PassageRuntime(sync, detection, recognition, passage_settings))
             while not stop.wait(.5):
                 pass
     except Exception as error:

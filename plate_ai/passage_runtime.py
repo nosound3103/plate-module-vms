@@ -121,6 +121,11 @@ class PassageRuntime:
 
     def _flush(self, now):
         for key, (camera, track) in tuple(self._pending.items()):
+            current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == camera.code), None)
+            if current != camera:
+                LOGGER.info("PLATE event camera=%s object_key=%s result=CANCELLED_CAMERA_REMOVED", camera.code, key)
+                del self._pending[key]
+                continue
             age = now-track.crossed_monotonic
             if age > self.settings.pending_ttl:
                 LOGGER.error("PLATE event camera=%s object_key=%s result=DROPPED_EXPIRED", camera.code, key)

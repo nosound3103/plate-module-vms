@@ -44,7 +44,7 @@ Các tùy chọn thường dùng:
 | `MQTT_WS_PATH` | `/mqtt` | WebSocket path |
 | `MQTT_CLIENT_ID` | Bắt buộc | Dạng `tts_<ten>_01`, duy nhất cho mỗi instance; cấm prefix `vms_staging_backend` |
 | `VMS_CAMERA_CODE` | Không giới hạn | Chỉ đồng bộ một camera nếu được đặt |
-| `VMS_CAMERA_SYNC_SECONDS` | `30` | Chu kỳ request cấu hình camera |
+| `VMS_CAMERA_SYNC_SECONDS` | `5` | Chu kỳ request cấu hình camera |
 | `LOG_LEVEL` | `INFO` | Mức log |
 
 Settings được validate trước khi kết nối. Python đọc process environment;
@@ -423,8 +423,10 @@ này chưa có bộ luật phát hiện vi phạm. Các thuộc tính chưa xác
 ### Queue, retry và log
 
 Pending event giới hạn trên toàn bộ camera. Khi MQTT chưa kết nối hoặc queue đầy,
-retry theo chu kỳ, tối đa đến TTL tính từ lúc qua vạch. Pending đã chốt được giữ
-khi camera bị gỡ hoặc discovery làm mới; việc gỡ camera ngừng tạo lượt mới.
+retry theo chu kỳ, tối đa đến TTL tính từ lúc qua vạch. Pending chưa vào queue
+MQTT bị hủy khi camera không còn trong registry, kể cả lúc discovery làm mới.
+Log `CANCELLED_CAMERA_REMOVED` cho biết lý do hủy; bản tin đã vào queue MQTT
+có thể tiếp tục được broker tiếp nhận.
 Khi hết TTL hoặc queue pending đầy, log nêu rõ sự kiện bị loại.
 
 Mỗi lần publish log đủ `topic`, `camera`, `object_key`, `result`:
@@ -599,10 +601,38 @@ Camera phải có UUID, `code`, RTSP source hợp lệ, module PLATE và trạng
 hoạt động. Chế độ `sync` chỉ giữ metadata; chế độ `detection` mở RTSP của các
 camera trong snapshot.
 
+### C02 — quản lý camera đang bật PLATE
+
+Đặt `VMS_ZONE_IDS=51` để lấy camera zone 51. Request gửi kèm
+`VMS_ORGANIZATION_ID`; module không đọc danh sách camera từ file JSON.
+`VMS_CAMERA_CODE` để trống để tự nhận camera mới trong zone.
+
+Chỉ nhận camera có `ai_modules` chứa `PLATE`, `is_active` không phải `false`
+và `status` là `ONLINE` hoặc `ACTIVE` (không có status thì mặc định `ONLINE`).
+Camera khai báo organization khác bị loại. Một camera có cấu hình lỗi bị bỏ
+qua và tăng số `rejected`, các camera hợp lệ còn lại vẫn được cập nhật.
+
+Khi nhận snapshot mới, camera bị tắt PLATE, ngừng hoạt động hoặc bị gỡ khỏi
+các zone theo dõi sẽ bị loại khỏi registry. Runtime yêu cầu reader RTSP dừng,
+ngừng lập lịch detection/OCR, loại kết quả inference đang chạy và hủy event
+chưa gửi của camera đó. Overlay được xóa; bật PLATE lại sẽ tự mở reader mới.
+Inference đã bắt đầu và RTSP I/O đang chờ sẽ kết thúc theo thời gian thực thi
+hoặc timeout hiện có, không bị ngắt cưỡng bức.
+
+Mỗi `VMS_CAMERA_SYNC_SECONDS` dịch vụ yêu cầu danh sách mới (mặc định 5 giây).
+Snapshot server gửi tới được áp dụng ngay; nếu server không chủ động gửi,
+độ trễ nhận thay đổi phụ thuộc chu kỳ này và thời gian backend phản hồi.
+Giá trị đã đặt trong `.env` được ưu tiên hơn mặc định.
+
+Log `PLATE camera eligibility ... result=ENABLED/REMOVED`,
+`Detection camera started/removed` và `Synchronized PLATE cameras` cho biết
+camera được nhận, loại và tổng số camera đủ điều kiện.
+
 Snapshot không đủ `total` hoặc sai organization/zone bị từ chối. Xóa camera ở
 một zone vẫn giữ camera nếu nó còn trong zone khác. Camera cùng code nhưng khác
 UUID giữa các zone bị từ chối. Cùng UUID thì dùng định nghĩa từ snapshot vừa
-nhận để hỗ trợ cập nhật source.
+nhận để hỗ trợ cập nhật source. Camera bị tắt PLATE trong bản cập nhật mới
+cũng được loại khỏi các bản ghi zone cũ đang chồng lấp.
 
 `ai_zones/PLATE/lines` nhận mảng hoặc object `{"lines": [...]}`. Mỗi vạch có
 id/code và hai điểm chuẩn hóa 0..1; `direction_point` hoặc `direction_vector`

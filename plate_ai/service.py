@@ -56,8 +56,9 @@ class CameraSyncService:
         except Exception:
             self.stop()
             raise
-        LOGGER.info("Camera sync started organization=%d zones=%d", self.settings.organization_id,
-                    len(self.settings.zone_ids))
+        LOGGER.info("Camera sync started organization=%d zone_ids=%s module=PLATE interval_seconds=%.1f",
+                    self.settings.organization_id, ",".join(map(str, self.settings.zone_ids)),
+                    self.settings.camera_sync_seconds)
         return self
 
     def stop(self):
@@ -153,15 +154,49 @@ class CameraSyncService:
             if int(data.get("total", len(data["cameras"]))) != len(data["cameras"]):
                 raise ValueError("Partial snapshots are unsupported")
             snapshot = {}
+            seen_codes = set()
+            refreshed_codes = set()
+            refreshed_ids = set()
+            rejected = 0
             for entry in data["cameras"]:
-                camera = Camera.parse(entry)
+                if isinstance(entry, dict):
+                    code = entry.get("code")
+                    identity = entry.get("id")
+                    if isinstance(code, str):
+                        if code in seen_codes:
+                            raise ValueError("Duplicate camera code")
+                        seen_codes.add(code)
+                        refreshed_codes.add(code)
+                    if isinstance(identity, str):
+                        refreshed_ids.add(identity.lower())
+                try:
+                    if isinstance(entry, dict) and "organization_id" in entry:
+                        if int(entry["organization_id"]) != self.settings.organization_id:
+                            raise ValueError("Camera organization mismatch")
+                    camera = Camera.parse(entry)
+                except (ValueError, TypeError, AttributeError, OverflowError):
+                    rejected += 1
+                    # A malformed camera must not preserve its previous active
+                    # configuration or block updates for the rest of the zone.
+                    continue
                 if camera is not None and (not self.settings.camera_code or camera.code == self.settings.camera_code):
-                    if camera.code in snapshot:
-                        raise ValueError("Duplicate camera code")
                     snapshot[camera.code] = camera
             # Process the refreshed zone last so a changed RTSP URL for the
             # same camera UUID can propagate across overlapping zone snapshots.
-            proposed = {key: value for key, value in self._snapshots.items() if key != zone_id}
+            proposed = {}
+            for key, entries in self._snapshots.items():
+                if key == zone_id:
+                    continue
+                updated = {}
+                for code, camera in entries.items():
+                    current = snapshot.get(code)
+                    if current is not None:
+                        if current.id != camera.id:
+                            raise ValueError("Conflicting camera UUIDs across zones")
+                        updated[code] = current
+                    elif code not in refreshed_codes and camera.id not in refreshed_ids:
+                        updated[code] = camera
+                proposed[key] = updated
             proposed[zone_id] = snapshot
             desired = {}
             for entries in proposed.values():
@@ -171,8 +206,8 @@ class CameraSyncService:
                     desired[code] = camera
             self._snapshots = proposed
             self._reconcile(desired)
-            LOGGER.info("Synchronized PLATE cameras zone=%d count=%d total_cameras=%d",
-                        zone_id, len(snapshot), len(desired))
+            LOGGER.info("Synchronized PLATE cameras zone=%d received=%d eligible=%d rejected=%d total_cameras=%d",
+                        zone_id, len(data["cameras"]), len(snapshot), rejected, len(desired))
             return
         parts = topic.split("/")
         if len(parts) < 4 or parts[:2] != ["smart_vms", "cameras"] or parts[3] != "ai_zones":
@@ -197,11 +232,13 @@ class CameraSyncService:
             if current is None or current.id != previous.id:
                 self.transport.unsubscribe_camera(code)
                 self._zones.pop(code, None)
+                LOGGER.info("PLATE camera eligibility camera=%s result=REMOVED", code)
         self._cameras = desired
         for code in desired:
             if code not in self._zones:
                 self._zones[code] = ZoneStore()
                 self.transport.subscribe_camera(code)
+                LOGGER.info("PLATE camera eligibility camera=%s result=ENABLED", code)
         self._publish_state()
 
     def _publish_state(self):

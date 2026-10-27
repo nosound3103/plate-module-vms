@@ -16,7 +16,7 @@ class Settings:
     broker_port: int = 443
     websocket_path: str = "/mqtt"
     camera_code: str | None = None
-    camera_sync_seconds: float = 30.
+    camera_sync_seconds: float = 5.
     keepalive_seconds: int = 30
     reconnect_max_seconds: int = 30
     config_queue_size: int = 256
@@ -88,7 +88,7 @@ class Settings:
             broker_port=number("MQTT_PORT", int, default="443"),
             websocket_path=read("MQTT_WS_PATH", default="/mqtt"),
             camera_code=read("VMS_CAMERA_CODE", default="") or None,
-            camera_sync_seconds=number("VMS_CAMERA_SYNC_SECONDS", float, default="30"),
+            camera_sync_seconds=number("VMS_CAMERA_SYNC_SECONDS", float, default="5"),
             keepalive_seconds=number("MQTT_KEEPALIVE_SECONDS", int, default="30"),
             reconnect_max_seconds=number("MQTT_RECONNECT_MAX_SECONDS", int, default="30"),
             config_queue_size=number("VMS_CONFIG_QUEUE_SIZE", int, default="256"),

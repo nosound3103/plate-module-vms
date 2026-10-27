@@ -44,6 +44,10 @@ class BboxRuntime:
         self.stop()
 
     def _send(self, snapshot, *, clear=False):
+        current = next((c.camera for c in self.sync.snapshot().cameras
+                        if c.camera.code == snapshot.camera.code), None)
+        if not clear and current != snapshot.camera:
+            return
         message = build_bbox_message(snapshot, self.sync.settings.organization_id, self.settings, clear=clear)
         queued = self.publish(message, topic_prefix=self.settings.topic_prefix)
         if queued:

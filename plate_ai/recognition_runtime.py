@@ -90,6 +90,9 @@ class RecognitionRuntime:
                 self._seen[code] = key
                 self._next_at[code] = time.monotonic()+self.settings.interval_seconds
                 try:
+                    current = next((c for c in self.sync.snapshot().cameras if c.camera.code == code), None)
+                    if current != config:
+                        continue
                     started = time.monotonic()
                     vehicles = self.pipeline.process(detected, config.zones)
                     elapsed = (time.monotonic()-started)*1000

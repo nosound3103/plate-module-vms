@@ -95,16 +95,20 @@ class DetectionRuntime:
     def latest(self, camera_code):
         with self._lock:
             result = self._results.get(camera_code)
-        if result is not None and time.monotonic()-result.frame.received_monotonic <= self.settings.max_frame_age:
+        current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == camera_code), None)
+        if (result is not None and result.camera == current and not self._stop.is_set()
+                and time.monotonic()-result.frame.received_monotonic <= self.settings.max_frame_age):
             return result
         return None
 
     def metadata(self, camera_code):
         """Recent detection geometry for asynchronous association; no frame images."""
         now = time.monotonic()
+        current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == camera_code), None)
         with self._lock:
             return tuple(m for m in self._metadata.get(camera_code, ())
-                         if now-m.received_monotonic <= self._metadata_seconds)
+                         if m.camera == current and not self._stop.is_set()
+                         and now-m.received_monotonic <= self._metadata_seconds)
 
     @property
     def metadata_enabled(self):
@@ -153,6 +157,9 @@ class DetectionRuntime:
                 with self._lock:
                     if self._states.get(code) is not state:
                         continue
+                current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == code), None)
+                if current != state.reader.camera:
+                    continue
                 state.next_inference_at = now+1/self.settings.max_fps
                 try:
                     started = time.monotonic()
@@ -160,8 +167,10 @@ class DetectionRuntime:
                     inference_ms = (time.monotonic()-started)*1000
                     result = DetectionResult(state.reader.camera, frame, tuple(detections), inference_ms)
                     age = time.monotonic()-frame.received_monotonic
+                    current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == code), None)
                     with self._lock:
-                        if self._stop.is_set() or self._states.get(code) is not state:
+                        if (self._stop.is_set() or self._states.get(code) is not state
+                                or current != state.reader.camera):
                             continue
                         if age <= self.settings.max_frame_age:
                             self._results[code] = result

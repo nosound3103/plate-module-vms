@@ -19,17 +19,22 @@ def main():
         recognition_settings = None
         passage_settings = None
         bbox_settings = None
+        red_light_settings = None
         tracking_enabled = False
         if args.mode == "detection":
             from .detection_config import DetectionSettings
             from .recognition_config import RecognitionSettings
             from .passage_config import PassageSettings
             from .bbox_config import BboxSettings
+            from .red_light_config import RedLightSettings
             detection_settings = DetectionSettings.from_env()
             recognition_settings = RecognitionSettings.from_env()
             passage_settings = PassageSettings.from_env()
             bbox_settings = BboxSettings.from_env()
-            tracking_enabled = passage_settings.enabled or bbox_settings.enabled
+            red_light_settings = RedLightSettings.from_env()
+            tracking_enabled = passage_settings.enabled or bbox_settings.enabled or red_light_settings.enabled
+            if red_light_settings.enabled and not recognition_settings.enabled:
+                raise ValueError("RED_LIGHT_ENABLED requires PLATE_OCR_ENABLED=true")
             if passage_settings.enabled and not recognition_settings.enabled:
                 raise ValueError("PLATE_EVENTS_ENABLED requires PLATE_OCR_ENABLED=true")
             if bbox_settings.enabled and not recognition_settings.enabled:
@@ -55,14 +60,16 @@ def main():
                 detection = stack.enter_context(DetectionRuntime(
                     sync, detection_settings,
                     metadata_frames=passage_settings.history_frames if tracking_enabled else 0,
-                    metadata_seconds=passage_settings.history_seconds))
+                    metadata_seconds=passage_settings.history_seconds,
+                    evidence_frames=red_light_settings.frame_buffer if red_light_settings.enabled else 0))
                 if recognition_settings.enabled:
                     from .recognition_runtime import RecognitionRuntime
                     recognition = stack.enter_context(RecognitionRuntime(sync, detection, recognition_settings))
                     if tracking_enabled:
                         from .passage_runtime import PassageRuntime
                         passages = stack.enter_context(PassageRuntime(sync, detection, recognition, passage_settings,
-                                                                     emit_events=passage_settings.enabled))
+                                                                     emit_events=passage_settings.enabled,
+                                                                     red_light_settings=red_light_settings))
                         if bbox_settings.enabled:
                             from .bbox_runtime import BboxRuntime
                             stack.enter_context(BboxRuntime(sync, passages, bbox_settings))

@@ -5,7 +5,7 @@ import logging
 import queue
 import threading
 import time
-from .domain import Camera, Zone, CrossingLine, ZoneStore
+from .domain import Camera, Zone, CrossingLine, TrafficZone, ZoneStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -13,7 +13,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class CameraConfiguration:
     camera: Camera
-    zones: tuple[Zone | CrossingLine, ...]
+    zones: tuple[Zone | CrossingLine | TrafficZone, ...]
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,56 @@ from dataclasses import dataclass, field
 import math
 from uuid import UUID
 
+TRAFFIC_ZONE_NAMES = {"TRAFFICLIGHT", "STOP-ZONE", "VIOLATION-ZONE"}
+
+
+@dataclass(frozen=True)
+class TrafficZone:
+    """Named VMS polygon. Invalid updates replace old geometry (fail closed)."""
+    id: str
+    name: str
+    points: tuple = ()
+
+    @classmethod
+    def parse(cls, data):
+        name = str(data.get("name", "")).strip().upper()
+        identity = str(data.get("id") or data.get("code") or name)
+        if data.get("is_active") is False:
+            return None
+        configured = data.get("ai_modules", data.get("ai_module"))
+        if configured is not None and "PLATE" not in modules(configured):
+            return None
+        try:
+            raw = data.get("zone", data.get("points"))
+            if isinstance(raw, dict):
+                raw = raw.get("points")
+            points = tuple((float(p["x"]), float(p["y"])) if isinstance(p, dict)
+                           else (float(p[0]), float(p[1])) for p in raw)
+            if len(points) > 3 and points[0] == points[-1]:
+                points = points[:-1]
+            if len(points) < 3 or len(set(points)) != len(points):
+                raise ValueError("Invalid vertices")
+            if any(not math.isfinite(v) or not 0 <= v <= 1 for p in points for v in p):
+                raise ValueError("Coordinates must be normalized to source frame")
+            area = sum(a[0]*b[1]-b[0]*a[1] for a, b in zip(points, points[1:]+points[:1]))
+            if abs(area) < 1e-8:
+                raise ValueError("No polygon area")
+            def orient(a, b, c):
+                return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+            edges = list(zip(points, points[1:]+points[:1]))
+            for i, (a, b) in enumerate(edges):
+                for j, (c, d) in enumerate(edges):
+                    if j <= i or j == i+1 or (i == 0 and j == len(edges)-1):
+                        continue
+                    if (orient(a, b, c)*orient(a, b, d) <= 0
+                            and orient(c, d, a)*orient(c, d, b) <= 0
+                            and max(min(a[0], b[0]), min(c[0], d[0])) <= min(max(a[0], b[0]), max(c[0], d[0]))
+                            and max(min(a[1], b[1]), min(c[1], d[1])) <= min(max(a[1], b[1]), max(c[1], d[1]))):
+                        raise ValueError("Self intersecting polygon")
+            return cls(identity, name, points)
+        except (TypeError, ValueError, KeyError, IndexError, OverflowError):
+            return cls(identity, name)
+
 
 def modules(value) -> set[str]:
     if isinstance(value, str):
@@ -191,12 +241,19 @@ class ZoneStore:
                     entry = {**entry, "id": topic_suffix.split("/")[-1]}
                 if not collection_topic and str(entry.get("id") or entry.get("code")) != topic_suffix.split("/")[-1]:
                     raise ValueError("Geometry identity must match its topic")
-                is_line = force_line or entry.get("shape_type") == "line_crossing" or "line" in entry
-                zone = (CrossingLine.parse(entry, module_scoped=module_scoped) if is_line
+                named = str(entry.get("name", "")).strip().upper() in TRAFFIC_ZONE_NAMES
+                if named and not entry.get("id") and not entry.get("code"):
+                    entry = {**entry, "id": str(entry["name"]).strip().upper()}
+                is_line = not named and (force_line or entry.get("shape_type") == "line_crossing" or "line" in entry)
+                zone = (TrafficZone.parse(entry) if named else
+                        CrossingLine.parse(entry, module_scoped=module_scoped) if is_line
                         else Zone.parse(entry, module_scoped=module_scoped))
                 identity = str(entry.get("id") or entry.get("code"))
                 key = ("line" if is_line else "polygon", identity)
                 if key in parsed:
+                    if named:
+                        parsed[key] = TrafficZone(identity, str(entry["name"]).strip().upper())
+                        continue
                     raise ValueError("Duplicate AI geometry identity")
                 parsed[key] = zone
         # Parse the whole update before modifying live state. Polygon and line

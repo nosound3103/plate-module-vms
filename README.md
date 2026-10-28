@@ -708,3 +708,58 @@ Log sử dụng UTC với hậu tố `Z`. Các mốc chính:
 
 Log không chứa RTSP URL, mật khẩu hoặc raw MQTT payload. `QUEUED` chưa xác nhận
 VMS xử lý request; snapshot trả về xác nhận service đã nhận được cấu hình.
+
+## Red Light Violation Detection
+
+Phát hiện xe đi từ `STOP-ZONE` sang `VIOLATION-ZONE` khi đèn đỏ, dùng chung
+detector, tracker và OCR hiện có; giữ nguyên counting. Màu đèn được phân tích
+bằng HSV trong polygon, gom khe LED nhỏ và xác nhận qua hai frame. Preview
+hiển thị **R / G / Y / U** tương ứng đỏ / xanh / vàng / không xác định.
+
+**Bật tính năng** trong `.env`, sau đó rebuild service:
+
+```dotenv
+RED_LIGHT_ENABLED=true
+PLATE_OCR_ENABLED=true
+PLATE_BBOX_ENABLED=true
+RED_LIGHT_SETTINGS='{"snapshot_dir":"/snapshots/red_light"}'
+```
+
+```powershell
+docker compose --profile gpu up -d --build plate-sync
+```
+
+**Zone VMS:** gửi ba polygon có `name` là `TRAFFICLIGHT`, `STOP-ZONE`,
+`VIOLATION-ZONE` qua topic config PLATE hiện có. Dùng các field `name`, `line`,
+`zone`; `line` có thể là `null`, `zone` là mảng điểm `{x,y}` chuẩn hóa 0..1 theo
+toàn frame nguồn. STOP và VIOLATION nên chung ranh giới. Thiếu, trùng hoặc sai
+hình học sẽ tắt rule; cập nhật zone reset trạng thái và hủy pending violation.
+Riêng ba zone này, geometry sai không giữ lại vùng hợp lệ cũ.
+
+Các ngưỡng chỉnh qua JSON `RED_LIGHT_SETTINGS`; xem `RedLightSettings` trong
+`plate_ai/red_light_config.py`. Mặc định: S≥100, V≥150; Hue đỏ 0–7 và 170–179,
+vàng 8–35, xanh 36–90; diện tích màu tối thiểu 0.5% mask, closing kernel 5,
+support ≥35%. Hai quan sát cách nhau quá 0.5 giây sẽ mất xác nhận.
+
+**Sự kiện:** gửi `RED_LIGHT` qua `smart_vms/ai_events/PLATE`, QoS 1, không retain.
+Trạng thái đèn và timestamp được giữ tại crossing; không kết luận khi mất track,
+đèn UNKNOWN hoặc crossing không đủ căn cứ. Chờ OCR mặc định 2 giây, tối đa 30
+giây; hết hạn chưa có biển thì ghi log và bỏ event. Snapshot là PNG gốc đã lưu
+trong volume `./snapshots:/snapshots`; VMS cần truy cập được đường dẫn này.
+Trên Linux, thư mục phải ghi được với UID 10001. Pending trong RAM mất khi restart.
+
+Publisher chờ PUBACK + 1.25 giây trước event cùng camera/biển tiếp theo để giảm
+xung đột dedup. Backend chưa có trong repo: cần tách dedup violation khỏi
+recognition, dùng khóa `(camera_id, entity_id, violation_type_code)` và kiểm thử
+hai event trong cùng 1 giây vẫn tạo đủ violation event/case. PUBACK chỉ xác nhận
+broker nhận, chưa xác nhận VMS tạo case. MVP chỉ xử lý đèn chính, chưa có ngoại lệ rẽ.
+
+**Kiểm thử và chẩn đoán HSV:**
+
+```powershell
+& 'C:\Notebooks\Environments\dl-env\Scripts\python' -m unittest discover -s tests -p test_red_light.py -v
+Get-Content tools/diagnose_traffic_light.py -Raw | docker compose exec -T -e DIAGNOSTIC_SAMPLES=220 plate-sync /app/.venv/bin/python -
+```
+
+Chẩn đoán chỉ đọc, lưu ROI và phân phối màu tại `snapshots/diagnostics/<timestamp>`.
+Trên VMS, kiểm tra đủ bốn pha, ảnh crossing, MQTT reconnect và case thực ở backend.

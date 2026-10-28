@@ -103,7 +103,9 @@ class Track:
                 px1, py1, px2, py2 = plate.bbox
                 self.plate_relative = ((px1-x1)/(x2-x1), (py1-y1)/(y2-y1),
                                        (px2-x1)/(x2-x1), (py2-y1)/(y2-y1))
-        if self.event is not None or self.sent or not read.license_plate.text:
+        # A frozen passage event stays unchanged, but a later RED_LIGHT event
+        # for this track must still be able to consume asynchronous OCR.
+        if not read.license_plate.text:
             return
         text = read.license_plate.text
         count, total, previous = self.votes.get(text, (0, 0., None))

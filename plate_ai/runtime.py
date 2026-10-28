@@ -45,7 +45,7 @@ class DetectionRuntime:
     the latest frame per camera, preserving matching crops for downstream stages.
     """
     def __init__(self, sync_service, settings, *, detector_factory=VehicleDetector,
-                 stream_factory=LatestFrameStream, metadata_frames=0, metadata_seconds=4.):
+                 stream_factory=LatestFrameStream, metadata_frames=0, metadata_seconds=4., evidence_frames=0):
         if metadata_frames < 0 or metadata_seconds <= 0:
             raise ValueError("Invalid detection metadata limits")
         self.sync, self.settings = sync_service, settings
@@ -54,6 +54,8 @@ class DetectionRuntime:
         self._lock = threading.Lock()
         self._states, self._retiring, self._results = {}, {}, {}
         self._metadata = {}
+        self._frames = {}
+        self._evidence_frames = evidence_frames
         self._metadata_frames, self._metadata_seconds = metadata_frames, metadata_seconds
         self._stop = threading.Event()
         self._controller = threading.Thread(target=self._supervise, name="detection-controller", daemon=True)
@@ -114,6 +116,13 @@ class DetectionRuntime:
     def metadata_enabled(self):
         return self._metadata_frames > 0
 
+    def frame_for(self, metadata):
+        """Exact sequence only; never substitute a newer frame for evidence/HSV."""
+        with self._lock:
+            return next((f for f in self._frames.get(metadata.camera.code, ())
+                         if f.sequence == metadata.sequence
+                         and f.received_monotonic == metadata.received_monotonic), None)
+
     def _supervise(self):
         while not self._stop.is_set():
             desired = {c.camera.code: c.camera for c in self.sync.snapshot().cameras}
@@ -126,6 +135,7 @@ class DetectionRuntime:
                             del self._states[code]
                             self._results.pop(code, None)
                             self._metadata.pop(code, None)
+                            self._frames.pop(code, None)
                             LOGGER.info("Detection camera removed camera=%s", code)
                     for code, reader in tuple(self._retiring.items()):
                         if not reader.is_alive():
@@ -174,6 +184,8 @@ class DetectionRuntime:
                             continue
                         if age <= self.settings.max_frame_age:
                             self._results[code] = result
+                            if self._evidence_frames:
+                                self._frames.setdefault(code, deque(maxlen=self._evidence_frames)).append(frame)
                             if self._metadata_frames:
                                 history = self._metadata.setdefault(code, deque(maxlen=self._metadata_frames))
                                 history.append(DetectionMetadata(result.camera, frame.sequence, frame.captured_at,
@@ -205,6 +217,7 @@ class DetectionRuntime:
             self._states.clear()
             self._results.clear()
             self._metadata.clear()
+            self._frames.clear()
             self._retiring.clear()
         for reader in readers:
             reader.request_stop()

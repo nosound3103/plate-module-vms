@@ -27,6 +27,8 @@ class OverlaySnapshot:
     detections: tuple[OverlayDetection, ...]
     count_in: int
     count_out: int
+    traffic_light_points: tuple = ()
+    traffic_light: object = None
 
 
 def normalized_box(box):
@@ -38,6 +40,18 @@ def build_bbox_message(snapshot, organization_id, settings, *, clear=False):
     now = time.monotonic()
     detections = []
     if not clear:
+        if snapshot.traffic_light_points and snapshot.traffic_light is not None:
+            from .red_light import COLORS, LABELS
+            sample = snapshot.traffic_light
+            xs, ys = zip(*snapshot.traffic_light_points)
+            b, g, r = COLORS[sample.state]
+            key = f"{snapshot.camera.id}:TRAFFICLIGHT"
+            detections.append({"id": key, "global_id": key,
+                               "class": LABELS[sample.state], "text": LABELS[sample.state],
+                               "traffic_light_state": sample.state,
+                               "confidence": sample.confidence,
+                               "bbox": normalized_box((min(xs), min(ys), max(xs), max(ys))),
+                               "color": f"#{r:02x}{g:02x}{b:02x}"})
         for item in snapshot.detections:
             box = normalized_box(item.bbox)
             if box is None:

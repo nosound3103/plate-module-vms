@@ -24,6 +24,8 @@ x-inference: &inference
     PLATE_OCR_ENABLED: "${PLATE_OCR_ENABLED:-true}"
     PLATE_EVENTS_ENABLED: "${PLATE_EVENTS_ENABLED:-true}"
     PLATE_BBOX_ENABLED: "${PLATE_BBOX_ENABLED:-true}"
+    RED_LIGHT_ENABLED: "${RED_LIGHT_ENABLED:-false}"
+    RED_LIGHT_SETTINGS: '${RED_LIGHT_SETTINGS:-{"snapshot_dir":"/snapshots/red_light"}}'
   volumes:
     - type: bind
       source: ./models/weights
@@ -31,6 +33,9 @@ x-inference: &inference
       read_only: true
       bind:
         create_host_path: false
+    - type: bind
+      source: ./snapshots
+      target: /snapshots
   tmpfs:
     - /tmp:size=256m,mode=1777
 

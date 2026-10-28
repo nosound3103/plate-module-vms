@@ -3,6 +3,8 @@ import json
 import logging
 import ssl
 import threading
+import time
+from collections import OrderedDict
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class MqttTransport:
         self._lock = threading.Lock()
         self._publish_lock = threading.Lock()
         self._pending_publishes = {}
+        self._publication_status = OrderedDict()
         self._camera_codes = set()
         self._message_handler = lambda *_: None
         self._connect_handler = lambda: None
@@ -97,6 +100,11 @@ class MqttTransport:
     def _on_publish(self, _client, _userdata, mid, reason_code, _properties):
         with self._publish_lock:
             context = self._pending_publishes.pop(mid, None)
+            if context is not None:
+                self._publication_status[context[1]] = (
+                    "REJECTED" if getattr(reason_code, "is_failure", False) else "ACK", time.monotonic())
+                while len(self._publication_status) > 1024:
+                    self._publication_status.popitem(last=False)
         if context is not None:
             camera_code, object_key = context
             status = "BROKER_REJECTED" if getattr(reason_code, "is_failure", False) else "BROKER_ACK"
@@ -132,10 +140,20 @@ class MqttTransport:
             accepted = info.rc in {self._mqtt.MQTT_ERR_SUCCESS, self._mqtt.MQTT_ERR_NO_CONN}
             if accepted:
                 self._pending_publishes[info.mid] = (camera_code, object_key)
+                self._publication_status[object_key] = ("PENDING", time.monotonic())
+                while len(self._publication_status) > 1024:
+                    self._publication_status.popitem(last=False)
             status = ("QUEUED" if info.rc == self._mqtt.MQTT_ERR_SUCCESS else "QUEUED_RECONNECT") if accepted else f"REJECTED_RC_{info.rc}"
             LOGGER.info("publish topic=%s camera=%s object_key=%s result=%s mid=%d",
                         PLATE_TOPIC, camera_code, object_key, status, info.mid)
             return accepted
+
+    def publication_status(self, object_key):
+        """Broker receipt time for coordinating the backend's plate dedup window."""
+        with self._publish_lock:
+            if any(key == object_key for _, key in self._pending_publishes.values()):
+                return ("PENDING", 0.)
+            return self._publication_status.get(object_key)
 
     def subscribe_camera(self, code):
         with self._lock:

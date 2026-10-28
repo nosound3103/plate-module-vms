@@ -373,8 +373,9 @@ Broker cần cho phép publish `smart_vms/ai_events/PLATE`.
 - Mỗi track chỉ chốt lượt qua vạch đầu tiên, kể cả khi xe quay lại hoặc cắt thêm
   vạch khác. Thêm camera tự tạo tracker; đổi UUID/source tạo phiên tracking mới.
 
-Lịch sử metadata detection giữ sequence, thời điểm nhận, kích thước ảnh và bbox,
-không giữ frame ảnh. Worker passage đọc các metadata còn hạn, ghép OCR bằng đúng
+Lịch sử metadata detection giữ sequence, thời điểm nhận, kích thước ảnh và bbox.
+Khi bật snapshot hoặc đèn đỏ, cache riêng giữ tối đa 4 frame gốc/camera để lấy
+đúng ảnh crossing. Worker passage đọc các metadata còn hạn, ghép OCR bằng đúng
 `(sequence, received_monotonic, detection_index)` của camera. OCR thiếu lịch sử
 tương ứng bị bỏ qua; không gán sang xe hiện tại theo bbox gần nhất. Mỗi track tích
 lũy tối đa 16 giả thuyết biển, chọn text theo số lượt đọc rồi tổng confidence.
@@ -709,6 +710,34 @@ Log sử dụng UTC với hậu tố `Z`. Các mốc chính:
 Log không chứa RTSP URL, mật khẩu hoặc raw MQTT payload. `QUEUED` chưa xác nhận
 VMS xử lý request; snapshot trả về xác nhận service đã nhận được cấu hình.
 
+## Snapshot ảnh sự kiện
+
+Nhận diện và vi phạm đều lấy frame gốc lúc crossing, encode JPEG trong worker
+nền rồi POST multipart đến `https://MQTT_HOST/storage/upload/file` với `file`,
+`camera_id` thực và `category=plate`. Không dùng tài khoản MQTT để xác thực HTTP.
+Chỉ `object_key` trả về được đặt vào `snapshot_url`; không dùng URL presigned,
+đường dẫn local hoặc base64. Retry MQTT giữ nguyên event và ảnh đã upload.
+
+```dotenv
+PLATE_SNAPSHOT_ENABLED=true
+PLATE_SNAPSHOT_TIMEOUT_SECONDS=4
+PLATE_SNAPSHOT_ATTEMPTS=2
+PLATE_SNAPSHOT_WAIT_SECONDS=10
+PLATE_SNAPSHOT_WORKERS=2
+PLATE_SNAPSHOT_MAX_PENDING=64
+PLATE_SNAPSHOT_JPEG_QUALITY=90
+```
+
+Mặc định bật upload, giới hạn ảnh 10 MB, timeout mỗi request 4 giây và tối đa
+hai lần thử cho lỗi mạng/429/5xx. Lỗi 403/413/422 không retry. Quá 10 giây chờ,
+queue đầy hoặc upload lỗi vẫn publish event với `snapshot_url: null` và ghi log.
+Thời gian chờ phải nhỏ hơn TTL event. HTTP retry có thể để lại ảnh không được
+tham chiếu nếu server đã lưu nhưng response bị mất; không tạo thêm event MQTT.
+
+Kiểm tra ảnh qua `https://MQTT_HOST/api/v1/snapshot/image?object_key=<object_key>`.
+Test: `python -m unittest discover -s tests -p test_snapshots.py -v` trong Docker
+hoặc environment `dl-env` đã cấu hình ở trên.
+
 ## Red Light Violation Detection
 
 Phát hiện xe đi từ `STOP-ZONE` sang `VIOLATION-ZONE` khi đèn đỏ, dùng chung
@@ -744,13 +773,14 @@ support ≥35%. Hai quan sát cách nhau quá 0.5 giây sẽ mất xác nhận.
 **Sự kiện:** gửi `RED_LIGHT` qua `smart_vms/ai_events/PLATE`, QoS 1, không retain.
 Trạng thái đèn và timestamp được giữ tại crossing; không kết luận khi mất track,
 đèn UNKNOWN hoặc crossing không đủ căn cứ. Chờ OCR mặc định 2 giây, tối đa 30
-giây; hết hạn chưa có biển thì ghi log và bỏ event. Snapshot là PNG gốc đã lưu
-trong volume `./snapshots:/snapshots`; VMS cần truy cập được đường dẫn này.
+giây; hết hạn chưa có biển thì ghi log và bỏ event. Snapshot upload theo luồng
+ở trên; bản PNG gốc giữ thêm trong `./snapshots:/snapshots` để đối chiếu local.
 Trên Linux, thư mục phải ghi được với UID 10001. Pending trong RAM mất khi restart.
 
 Publisher chờ PUBACK + 1.25 giây trước event cùng camera/biển tiếp theo để giảm
-xung đột dedup. Backend chưa có trong repo: cần tách dedup violation khỏi
-recognition, dùng khóa `(camera_id, entity_id, violation_type_code)` và kiểm thử
+xung đột rate-limiter. Backend còn dedup database theo biển/camera và `event_time`
+±1 giây, nên giãn publish **không giải quyết được lớp này**. Cần tách dedup violation
+khỏi recognition, dùng khóa `(camera_id, entity_id, violation_type_code)` và kiểm thử
 hai event trong cùng 1 giây vẫn tạo đủ violation event/case. PUBACK chỉ xác nhận
 broker nhận, chưa xác nhận VMS tạo case. MVP chỉ xử lý đèn chính, chưa có ngoại lệ rẽ.
 

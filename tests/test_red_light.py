@@ -266,7 +266,7 @@ class DeliveryTests(unittest.TestCase):
                 self.assertEqual(event["payload"]["vehicle"]["license_plate"]["text"], "30A12345")
                 self.assertEqual(event["camera_id"], CAMERA.id)
                 self.assertEqual(event["payload"]["violation_evidence"]["track_id"], t.id)
-                self.assertEqual(event["snapshot_url"], snapshot)
+                self.assertIsNone(event["snapshot_url"])  # Local paths cannot be resolved by VMS Storage.
                 self.assertTrue(Path(snapshot).is_file())
                 np.testing.assert_array_equal(cv2.imread(snapshot), v.frame)
                 self.assertNotIn("owner_name", event["payload"]["vehicle"])

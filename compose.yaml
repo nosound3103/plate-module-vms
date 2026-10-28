@@ -23,6 +23,7 @@ x-inference: &inference
   environment:
     PLATE_OCR_ENABLED: "${PLATE_OCR_ENABLED:-true}"
     PLATE_EVENTS_ENABLED: "${PLATE_EVENTS_ENABLED:-true}"
+    PLATE_SNAPSHOT_ENABLED: "${PLATE_SNAPSHOT_ENABLED:-true}"
     PLATE_BBOX_ENABLED: "${PLATE_BBOX_ENABLED:-true}"
     RED_LIGHT_ENABLED: "${RED_LIGHT_ENABLED:-false}"
     RED_LIGHT_SETTINGS: '${RED_LIGHT_SETTINGS:-{"snapshot_dir":"/snapshots/red_light"}}'

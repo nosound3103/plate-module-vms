@@ -2,13 +2,11 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import logging
 import re
 import time
-from uuid import uuid4
-import cv2
 from .events import build_plate_event
+from .snapshots import save_original
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,21 +41,13 @@ class PlatePublishGate:
         return accepted
 
 
-def save_original(frame, directory):
-    destination = Path(directory).resolve()/f"{uuid4().hex}.png"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(destination), frame):
-        raise OSError("Could not save original crossing evidence")
-    return str(destination)
-
-
 def build_red_light_event(camera, violation, snapshot):
     track = violation.track
     read = track.best_read()
     if read is None or not re.sub(r"[^A-Z0-9]", "", read.license_plate.text.upper()):
         return None  # Unknown-plate backend violation contract is not present here.
     key = f"{track.object_key}:RED_LIGHT"
-    view = replace(track, crossed_epoch=violation.timestamp, object_key=key, direction="IN")
+    view = replace(track, crossed_epoch=violation.timestamp, object_key=key, direction=track.direction or "IN")
     event = build_plate_event(camera, view)
     vehicle = event["payload"]["vehicle"]
     event["payload"]["vehicle"] = {k: v for k, v in vehicle.items() if v is not None}
@@ -76,10 +66,12 @@ def build_red_light_event(camera, violation, snapshot):
 
 class RedLightEventPublisher:
     """Bounded pending OCR, one background disk worker, nonblocking publish/retry."""
-    def __init__(self, settings, publish):
+    def __init__(self, settings, publish, *, snapshots=None):
         self.settings, self.publish = settings, publish
+        self.snapshots = snapshots
         self.pending = {}
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="red-light-evidence")
+        self.executor = (None if snapshots else
+                         ThreadPoolExecutor(max_workers=1, thread_name_prefix="red-light-evidence"))
 
     def submit(self, camera, violation):
         if len(self.pending) >= self.settings.max_pending:
@@ -88,7 +80,8 @@ class RedLightEventPublisher:
         key = f"{violation.track.object_key}:RED_LIGHT"
         if key in self.pending:
             return
-        future = self.executor.submit(save_original, violation.frame, self.settings.snapshot_dir)
+        future = (self.snapshots.submit(camera, violation.frame, object_key=key, local_dir=self.settings.snapshot_dir)
+                  if self.snapshots else self.executor.submit(save_original, violation.frame, self.settings.snapshot_dir))
         # Future owns the frame until saved; do not retain a second reference for OCR wait.
         self.pending[key] = [camera, replace(violation, frame=None), time.monotonic(), future, None, 0.]
         LOGGER.info("RED_LIGHT camera=%s track=%s result=PENDING_OCR_EVIDENCE", camera.code, violation.track.id)
@@ -109,11 +102,21 @@ class RedLightEventPublisher:
                 future.cancel()
                 del self.pending[key]
                 continue
-            if age < self.settings.ocr_wait_seconds or now < retry_at or not future.done():
+            if age < self.settings.ocr_wait_seconds or now < retry_at:
                 continue
             try:
-                snapshot = future.result()
                 if event is None:
+                    if violation.track.best_read() is None:
+                        continue
+                    if self.snapshots:
+                        ready, snapshot = self.snapshots.resolve(future, age)
+                        if not ready:
+                            continue
+                    else:
+                        if not future.done():
+                            continue
+                        future.result()  # Keep local evidence, never publish a filesystem path.
+                        snapshot = None
                     event = build_red_light_event(camera, violation, snapshot)
                     if event is None:
                         continue
@@ -131,4 +134,5 @@ class RedLightEventPublisher:
         if self.pending:
             LOGGER.warning("RED_LIGHT result=STOPPED_NOT_PERSISTED pending=%d", len(self.pending))
         self.pending.clear()
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        if self.executor:
+            self.executor.shutdown(wait=False, cancel_futures=True)

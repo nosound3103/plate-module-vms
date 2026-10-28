@@ -38,10 +38,12 @@ class _CameraState:
 class PassageRuntime:
     """One metadata controller; inference and network acknowledgements run separately."""
     def __init__(self, sync_service, detection_runtime, recognition_runtime, settings, *, publish=None,
-                 emit_events=True, red_light_settings=None):
+                 emit_events=True, red_light_settings=None, snapshots=None):
         self.sync, self.detection, self.recognition = sync_service, detection_runtime, recognition_runtime
         self.settings = settings
         self.emit_events = emit_events
+        self.snapshots = snapshots
+        self._snapshot_futures = {}
         self.publish = publish if publish is not None else sync_service.transport.publish_plate_event
         self.red_settings = red_light_settings
         self.red_events = None
@@ -50,7 +52,7 @@ class PassageRuntime:
             from .red_light_events import PlatePublishGate, RedLightEventPublisher
             status = getattr(getattr(sync_service, "transport", None), "publication_status", None) if publish is None else None
             self.publish = PlatePublishGate(self.publish, red_light_settings.dedup_guard_seconds, status)
-            self.red_events = RedLightEventPublisher(red_light_settings, self.publish)
+            self.red_events = RedLightEventPublisher(red_light_settings, self.publish, snapshots=snapshots)
             self.light_detector = TrafficLightStateDetector(red_light_settings)
         self._states, self._pending = {}, {}
         self._overlay_lock = threading.Lock()
@@ -120,6 +122,10 @@ class PassageRuntime:
                         state.count_out += 1
                     if self.emit_events and len(self._pending) < self.settings.max_pending:
                         self._pending[track.object_key] = (state.camera, track)
+                        if self.snapshots:
+                            captured = self.detection.frame_for(metadata)
+                            self._snapshot_futures[track.object_key] = self.snapshots.submit(
+                                state.camera, captured.image if captured else None, object_key=track.object_key)
                         LOGGER.info("PLATE crossing camera=%s object_key=%s line=%s direction=%s result=PENDING_OCR",
                                     state.camera.code, track.object_key, line.id, track.direction)
                     elif self.emit_events:
@@ -151,16 +157,25 @@ class PassageRuntime:
             if current != camera:
                 LOGGER.info("PLATE event camera=%s object_key=%s result=CANCELLED_CAMERA_REMOVED", camera.code, key)
                 del self._pending[key]
+                self._cancel_snapshot(key)
                 continue
             age = now-track.crossed_monotonic
             if age > self.settings.pending_ttl:
                 LOGGER.error("PLATE event camera=%s object_key=%s result=DROPPED_EXPIRED", camera.code, key)
                 del self._pending[key]
+                self._cancel_snapshot(key)
                 continue
             if age < self.settings.ocr_wait_seconds or now < track.retry_at:
                 continue
             if track.event is None:
+                snapshot = None
+                if key in self._snapshot_futures:
+                    ready, snapshot = self.snapshots.resolve(self._snapshot_futures[key], age)
+                    if not ready:
+                        continue
                 track.event = build_plate_event(camera, track)
+                track.event["snapshot_url"] = snapshot
+                self._snapshot_futures.pop(key, None)
             track.retry_at = now+self.settings.retry_seconds
             try:
                 queued = self.publish(track.event, camera_code=camera.code, object_key=key)
@@ -171,6 +186,11 @@ class PassageRuntime:
             if queued:
                 track.sent = True
                 del self._pending[key]
+
+    def _cancel_snapshot(self, key):
+        future = self._snapshot_futures.pop(key, None)
+        if future:
+            future.cancel()
 
     def _run(self):
         while not self._stop.is_set():
@@ -325,6 +345,8 @@ class PassageRuntime:
             if self._pending:
                 LOGGER.warning("PLATE passage stopped pending_events=%d result=NOT_PERSISTED", len(self._pending))
             self._pending.clear()
+            for key in tuple(self._snapshot_futures):
+                self._cancel_snapshot(key)
             self._states.clear()
             with self._overlay_lock:
                 self._overlays.clear()

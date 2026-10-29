@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+# Reuse the locally verified TensorRT 10.13 image; no engine build at startup.
+FROM vehicle-bbox-experiment:trt10.13-v1 AS tensorrt
+FROM plate-module-vms:detection-cu128 AS runtime
+USER root
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/plate \
+    PLATE_DEVICE=cuda:0 PLATE_WEIGHTS_DIR=/models OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 XDG_CACHE_HOME=/tmp/cache \
+    TORCH_HOME=/tmp/torch OPENCV_LOG_LEVEL=SILENT OPENCV_FFMPEG_LOGLEVEL=-8
+WORKDIR /opt/plate
+COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt
+COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt_bindings /app/.venv/lib/python3.12/site-packages/tensorrt_bindings
+COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt_libs /app/.venv/lib/python3.12/site-packages/tensorrt_libs
+COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt_cu12-10.13.3.9.post1.dist-info /app/.venv/lib/python3.12/site-packages/tensorrt_cu12-10.13.3.9.post1.dist-info
+COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt_cu12_bindings-10.13.3.9.post1.dist-info /app/.venv/lib/python3.12/site-packages/tensorrt_cu12_bindings-10.13.3.9.post1.dist-info
+COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt_cu12_libs-10.13.3.9.post1.dist-info /app/.venv/lib/python3.12/site-packages/tensorrt_cu12_libs-10.13.3.9.post1.dist-info
+COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/cuda_toolkit-12.9.2.0.dist-info /app/.venv/lib/python3.12/site-packages/cuda_toolkit-12.9.2.0.dist-info
+RUN /app/.venv/bin/python -c "import tensorrt; assert tensorrt.__version__.startswith('10.13.3.9')" \
+    && uv pip check --python /app/.venv/bin/python
+COPY --chown=plate:plate plate_ai ./plate_ai
+USER plate
+ENTRYPOINT []
+CMD ["/app/.venv/bin/python", "-m", "plate_ai", "--mode", "detection"]

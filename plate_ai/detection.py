@@ -63,7 +63,10 @@ class YoloDetector:
         height, width = image.shape[:2]
         scale = min(self.image_size/width, self.image_size/height)
         resized_width, resized_height = round(width*scale), round(height*scale)
-        dw, dh = (self.image_size-resized_width) % self.stride/2, (self.image_size-resized_height) % self.stride/2
+        padding = (self.image_size-resized_width, self.image_size-resized_height)
+        if not getattr(self, "square_input", False):
+            padding = tuple(value % self.stride for value in padding)
+        dw, dh = padding[0]/2, padding[1]/2
         resized = cv2.resize(image, (resized_width, resized_height))
         padded = cv2.copyMakeBorder(resized, round(dh-.1), round(dh+.1), round(dw-.1), round(dw+.1),
                                     cv2.BORDER_CONSTANT, value=(114, 114, 114))
@@ -104,6 +107,15 @@ class YoloDetector:
 class VehicleDetector(YoloDetector):
     def __init__(self, settings):
         super().__init__(settings, class_labels=VEHICLE_TYPES)
+        if settings.vehicle_engine:
+            from .tensorrt_runtime import TensorRTEngine
+            self.model = TensorRTEngine(settings.weights_dir/settings.vehicle_engine,
+                                        settings.vehicle_engine_sha256, self.device, self.image_size,
+                                        max(self.classes)+1)
+            self.square_input = True
+            self.torch.cuda.empty_cache()
+            LOGGER.info("Vehicle backend=TENSORRT engine=%s input=%sx%s", settings.vehicle_engine,
+                        self.image_size, self.image_size)
 
     def detect(self, image):
         return tuple(VehicleDetection(d.label, d.confidence, d.bbox) for d in super().detect(image))

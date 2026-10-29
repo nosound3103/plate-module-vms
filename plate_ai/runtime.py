@@ -18,6 +18,7 @@ class DetectionResult:
     frame: CapturedFrame
     detections: tuple[VehicleDetection, ...]
     inference_ms: float
+    completed_monotonic: float = 0.
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class DetectionMetadata:
     width: int
     height: int
     detections: tuple[VehicleDetection, ...]
+    completed_monotonic: float = 0.
 
 
 @dataclass
@@ -54,6 +56,7 @@ class DetectionRuntime:
         self._lock = threading.Lock()
         self._states, self._retiring, self._results = {}, {}, {}
         self._metadata = {}
+        self._subscribers = set()
         self._frames = {}
         self._evidence_frames = evidence_frames
         self._metadata_frames, self._metadata_seconds = metadata_frames, metadata_seconds
@@ -116,6 +119,15 @@ class DetectionRuntime:
     def metadata_enabled(self):
         return self._metadata_frames > 0
 
+    def subscribe_updates(self, event):
+        with self._lock:
+            self._subscribers.add(event)
+        event.set()
+
+    def unsubscribe_updates(self, event):
+        with self._lock:
+            self._subscribers.discard(event)
+
     def frame_for(self, metadata):
         """Exact sequence only; never substitute a newer frame for evidence/HSV."""
         with self._lock:
@@ -174,8 +186,9 @@ class DetectionRuntime:
                 try:
                     started = time.monotonic()
                     detections = self.detector.detect(frame.image)
-                    inference_ms = (time.monotonic()-started)*1000
-                    result = DetectionResult(state.reader.camera, frame, tuple(detections), inference_ms)
+                    completed = time.monotonic()
+                    inference_ms = (completed-started)*1000
+                    result = DetectionResult(state.reader.camera, frame, tuple(detections), inference_ms, completed)
                     age = time.monotonic()-frame.received_monotonic
                     current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == code), None)
                     with self._lock:
@@ -190,11 +203,14 @@ class DetectionRuntime:
                                 history = self._metadata.setdefault(code, deque(maxlen=self._metadata_frames))
                                 history.append(DetectionMetadata(result.camera, frame.sequence, frame.captured_at,
                                                                  frame.received_monotonic, frame.image.shape[1],
-                                                                 frame.image.shape[0], result.detections))
+                                                                 frame.image.shape[0], result.detections, completed))
                                 while history and time.monotonic()-history[0].received_monotonic > self._metadata_seconds:
                                     history.popleft()
                         else:
                             self._results.pop(code, None)
+                        subscribers = tuple(self._subscribers) if age <= self.settings.max_frame_age else ()
+                    for event in subscribers:
+                        event.set()
                     if time.monotonic() >= state.next_log_at:
                         LOGGER.info("Vehicle detection camera=%s sequence=%d count=%d inference_ms=%.1f frame_age_ms=%.1f result=%s",
                                     code, frame.sequence, len(detections), inference_ms, age*1000,

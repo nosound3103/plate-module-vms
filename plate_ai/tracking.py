@@ -93,6 +93,8 @@ class Track:
     def remember(self, read, received_monotonic=None):
         if received_monotonic is not None:
             plate = read.license_plate
+            if self.plate_text and not plate.text:
+                return
             self.plate_relative = None
             self.plate_text = plate.text
             self.plate_confidence = plate.detection_confidence

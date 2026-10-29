@@ -29,6 +29,7 @@ class VehicleRecognition:
     license_plate: PlateRecognition
     manufacturer: str | None = None
     color: str | None = None
+    object_key: str | None = None
 
 
 def order_characters(detections, shape):
@@ -124,7 +125,7 @@ class RecognitionPipeline:
             return "", 0.
         return text, sum(d.confidence for d in characters)/len(characters)
 
-    def process(self, result, zones):
+    def process(self, result, zones, *, detection_indices=None):
         import cv2
         import numpy as np
         frame = result.frame.image
@@ -132,7 +133,9 @@ class RecognitionPipeline:
         polygons = [np.asarray([(x*(width-1), y*(height-1)) for x, y in zone.points], dtype=np.float32)
                     for zone in zones if isinstance(zone, Zone)]
         recognized = []
-        selected = sorted(enumerate(result.detections), key=lambda item: item[1].confidence, reverse=True)
+        selected = sorted(((i, v) for i, v in enumerate(result.detections)
+                           if detection_indices is None or i in detection_indices),
+                          key=lambda item: item[1].confidence, reverse=True)
         for index, vehicle in selected[:self.settings.max_vehicles]:
             x1, y1, x2, y2 = vehicle.bbox
             x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)

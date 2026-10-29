@@ -280,8 +280,9 @@ không cần file Compose bổ sung cho từng tính năng.
 | `PLATE_ATTRIBUTE_CONFIDENCE` | `0.5` | Ngưỡng nhận thuộc tính |
 | `PLATE_OCR_INTERVAL_SECONDS` | `0.5` | Khoảng cách tối thiểu giữa lượt xử lý/camera |
 | `PLATE_OCR_MAX_RESULT_AGE_SECONDS` | `2` | Hạn kết quả, tính từ lúc nhận frame |
-| `PLATE_OCR_MAX_VEHICLES` | `16` | Số xe tối đa/lượt, ưu tiên confidence cao |
+| `PLATE_OCR_MAX_VEHICLES` | `16` | Số track chưa có biển tối đa/lượt; luân phiên khi chưa đọc được |
 | `PLATE_OCR_MAX_PLATES_PER_VEHICLE` | `3` | Số biển ứng viên tối đa/xe |
+| `PLATE_OCR_MAX_PENDING_RESULTS` | `128` | Số kết quả chờ gắn vào track/camera; đầy thì tạm dừng OCR |
 
 Đổi artifact bằng `PLATE_<ROLE>_WEIGHT` và `PLATE_<ROLE>_SHA256`, với role
 `PLATE`, `DIGIT`, `BRAND`, `COLOR`, `PLATE_COLOR`. Các model thay thế phải có
@@ -289,24 +290,33 @@ kiến trúc, tên lớp và preprocessing tương thích; input size cố đị
 
 ### Worker và vòng đời kết quả
 
-Một worker OCR dùng chung năm model cho tất cả camera, xử lý luân phiên. Worker
-lấy kết quả vehicle detection mới nhất khi đến lượt; không tạo hàng đợi frame
-chờ OCR. Crop luôn lấy từ đúng frame của detection, không ghép bbox cũ với ảnh mới.
-Cache OCR giữ một kết quả/camera, chỉ gồm metadata, không giữ thêm ảnh.
+Luồng xử lý: **vehicle detection → tracking → bbox MQTT**, sau đó OCR và cập nhật
+thông tin lên cùng track. Bbox được đánh thức ngay khi có geometry mới, trước HSV
+và tạo preview; không chờ OCR hay snapshot. Detection và tracker dùng chung cho
+counting, đèn đỏ và OCR. Bbox vẫn chạy khi `PLATE_OCR_ENABLED=false`.
+
+Một worker OCR dùng chung năm model cho tất cả camera. Worker chỉ chọn track
+chưa có biển từ frame detection mới nhất đã được tracking; không xếp hàng ảnh.
+Crop luôn lấy đúng frame đó. Kết quả mang `object_key` và `detection_index` để
+không gắn nhầm xe khi thứ tự detection thay đổi. Khi có text biển hợp lệ, giữ
+biển và thuộc tính trong suốt track, bỏ qua cả plate detection và OCR ở các frame
+sau. Xe chưa đọc được được thử lại theo interval, luân phiên giữa các track.
+Hàng đợi kết quả và cache có giới hạn, chỉ giữ metadata. Mất track/tạo ID mới,
+đổi camera/source hoặc restart có thể cần nhận diện lại cùng một xe vật lý.
 
 Nếu camera có polygon, chỉ OCR xe có điểm giữa cạnh đáy nằm trong polygon.
 Nếu chỉ có vạch hoặc chưa có polygon, OCR trên toàn frame. Cập nhật camera hoặc
 polygon/vạch vô hiệu hóa kết quả cũ; kết quả đang chạy chỉ được nhận nếu cấu hình
-vẫn khớp và camera vẫn có detection còn hạn.
+vẫn khớp và frame xử lý còn hạn. Kết quả đã hoàn tất hợp lệ được giữ đến lúc
+tracker nhận, tránh mất biển khi controller bận; không chuyển kết quả sang ID mới.
 
 Worker detection và OCR chạy riêng, nhưng chia sẻ tài nguyên CPU/GPU. Nhiều xe
 hoặc nhiều camera có thể làm giảm FPS; không đảm bảo đồng bộ frame với video Web.
 Kết quả quá hạn bị loại, kể cả khi OCR vừa hoàn thành.
 
-Log `Plate recognition` có camera, sequence, số xe được xử lý, số biển detect,
-số biển đọc được, thời gian inference, tuổi frame và `READY`/`STALE`. Không log
-RTSP source, ảnh hoặc text biển số. `recognized=0` không đồng nghĩa model detect
-biển chưa chạy; cần xem đồng thời `plates`, `vehicles` và các ngưỡng cấu hình.
+Log `Plate recognition` có camera, sequence, số xe được xử lý, số biển đọc được,
+số track đã cache, thời gian inference, tuổi frame và `READY`/`NO_FRESH_READ`. Không log
+RTSP source, ảnh hoặc text biển số.
 
 ### Kết quả tích hợp
 
@@ -314,8 +324,8 @@ biển chưa chạy; cần xem đồng thời `plates`, `vehicles` và các ngư
 from plate_ai.recognition_config import RecognitionSettings
 from plate_ai.recognition_runtime import RecognitionRuntime
 
-# sync và detection là các runtime đang hoạt động trong ứng dụng.
-with RecognitionRuntime(sync, detection, RecognitionSettings()) as recognition:
+# sync, detection và passages (tracker) đã khởi động trong ứng dụng.
+with RecognitionRuntime(sync, detection, RecognitionSettings(), track_source=passages) as recognition:
     result = recognition.latest("CAM_01")
     if result is not None:
         for item in result.vehicles:
@@ -467,9 +477,10 @@ worker. Không tạo sự kiện giả khi khởi động. Bbox realtime thuộc
 | `PLATE_TRACK_HISTORY_FRAMES` | `64` | Số metadata tối đa/camera |
 
 Với tích hợp Python, tạo `DetectionRuntime(..., metadata_frames=64,
-metadata_seconds=4)`, khởi động `RecognitionRuntime`, sau đó khởi động
-`PassageRuntime(sync, detection, recognition, PassageSettings())`. Dừng theo thứ
-tự ngược lại. `publish` có thể inject callable nhận `(event, *, camera_code,
+metadata_seconds=4)`, tạo instance `RecognitionRuntime` nhưng chưa start, rồi
+khởi động `PassageRuntime(sync, detection, recognition, PassageSettings())` và bbox.
+Gán `recognition.track_source = passages`, sau đó start OCR. Dừng theo thứ tự
+ngược lại. `publish` có thể inject callable nhận `(event, *, camera_code,
 object_key)` và trả `True` khi đã nhận vào queue. Không block callable để đợi
 network acknowledgement.
 
@@ -482,9 +493,11 @@ docker compose --profile gpu up -d --build
 docker compose --profile gpu logs -f --tail 100 plate-sync
 ```
 
-Với CPU, dùng `--profile cpu`. Đặt `PLATE_OCR_ENABLED=true` và
-`PLATE_BBOX_ENABLED=true` để bật overlay. Nếu không gửi sự kiện qua vạch, đặt
+Với CPU, dùng `--profile cpu`. Đặt `PLATE_BBOX_ENABLED=true` để bật overlay;
+`PLATE_OCR_ENABLED=true` bổ sung thông tin biển số sau. Nếu không gửi sự kiện qua vạch, đặt
 `PLATE_EVENTS_ENABLED=false`. Các tính năng dùng chung một file Compose.
+Để chỉ xem khung xe khi tắt OCR, đặt thêm `PLATE_EVENTS_ENABLED=false` và
+`RED_LIGHT_ENABLED=false` vì hai loại sự kiện này cần biển số.
 
 ### Payload overlay
 
@@ -530,14 +543,16 @@ tọa độ map/PDF hoặc dữ liệu heatmap khi chưa có phép ánh xạ.
 - Publisher chỉ cho phép một packet overlay chưa gửi xong trên kết nối bbox.
   Khi socket bận hoặc mất kết nối, bỏ bản tin mới; không tạo queue retry theo frame.
   Scheduler luân phiên camera bắt đầu để chia lượt khi socket bận.
-- Có thể gửi lại snapshot còn mới giữa hai lần detect để duy trì overlay. Không
-  gửi bbox của frame quá 0.3 giây. Khi hết hạn, mất camera hoặc đổi source, gửi
+- Chỉ gửi khi có frame mới hoặc bổ sung OCR/trạng thái đèn; không lặp cùng overlay.
+  Giới hạn FPS vẫn áp dụng, giữ bản mới nhất khi bận. Không gửi bbox của frame
+  quá 0.3 giây. Khi hết hạn, mất camera hoặc đổi source, gửi
   payload `detections: []` để xóa khung nếu trước đó có khung. Payload xóa cũng
   có thể bị drop; Web tự hết hạn khung nếu không nhận bản tin tiếp theo.
 - Khung biển được lưu tương đối trong crop xe của frame OCR, sau đó chiếu vào
   bbox xe hiện tại. Đây là phép chiếu theo track xe, chưa phải tracker biển số
-  riêng; có thể lệch khi xe xoay hoặc đổi góc nhìn. Khung/text biển hết hạn sau
-  1 giây tính từ frame OCR. OCR mới tiếp tục cập nhật overlay sau khi event đã gửi.
+  riêng; có thể lệch khi xe xoay hoặc đổi góc nhìn. Khi đã đọc được biển, giữ
+  text và chiếu khung theo bbox xe đến khi track kết thúc; không chạy lại OCR.
+  Khung chưa đọc được text hết hạn theo `PLATE_BBOX_PLATE_MAX_AGE_SECONDS`.
 
 `timestamp` là thời điểm AI nhận frame sau decode, không phải PTS camera hay
 thời điểm video được phát trên Web. `published_at`, `frame_sequence`,
@@ -558,15 +573,66 @@ hoạt động khi chưa có vạch; khi đó không có lượt IN/OUT để t�
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `PLATE_BBOX_ENABLED` | `true` trong Compose | Bật worker bbox, yêu cầu OCR bật |
-| `PLATE_BBOX_MAX_FPS` | `10` | Giới hạn publish/camera |
+| `PLATE_BBOX_ENABLED` | `true` trong Compose | Bật worker bbox độc lập với OCR |
+| `PLATE_BBOX_MAX_FPS` | `10` | Tốc độ nạp lượt gửi/camera/giây |
+| `PLATE_BBOX_BURST_CAPACITY` | `2` | Số lượt gửi tích lũy; giữ một lượt cho frame mới |
 | `PLATE_BBOX_MAX_FRAME_AGE_SECONDS` | `0.3` | Hạn frame overlay |
-| `PLATE_BBOX_PLATE_MAX_AGE_SECONDS` | `1` | Hạn khung/text biển từ frame OCR |
+| `PLATE_BBOX_PLATE_MAX_AGE_SECONDS` | `1` | Hạn khung biển chưa đọc được text |
 | `PLATE_BBOX_TOPIC_PREFIX` | `smart_vms/ai/bbox` | Có thể chọn `smart_vms/bbox` |
 
 Chỉ publish một prefix mỗi instance. Không gửi đồng thời cả hai alias để tránh
 backend chuyển cùng overlay hai lần. Broker cần cho phép client bbox kết nối
 và publish prefix đã chọn. Không cần dependency hay weight bổ sung.
+
+Log `PLATE bbox ... detection_to_queue_ms` đo từ lúc vehicle detection hoàn tất
+đến khi Paho nhận bbox; đây chưa phải độ trễ đến Web. Test luồng ưu tiên bbox và
+cache OCR: `python -m unittest discover -s tests -p test_pipeline_priority.py -v`.
+
+Đo ngắn trên camera thực (chỉ gửi bbox, không gửi event/upload ảnh):
+
+```powershell
+docker compose --profile gpu run --rm --no-deps -T --entrypoint /app/.venv/bin/python -v "${PWD}/tools:/opt/plate/tools:ro" plate-sync /opt/plate/tools/benchmark_bbox_latency.py
+```
+
+### Thử TensorRT INT8 cho vehicle detection
+
+Image export riêng, không thêm dependency vào service camera. Tool dùng frame
+camera để calibration và một tập frame khác để đối chiếu; không gửi event hay
+upload ảnh. Engine dùng input tĩnh 640×640, batch 1; INT8 có thể giữ một số phép
+toán ở FP16/FP32. Xem [hướng dẫn calibration của NVIDIA](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/inference-library/work-quantized-types.html).
+
+```powershell
+docker compose --profile gpu build plate-sync
+docker build -f Dockerfile.quantize -t plate-module-vms:quantize-int8 .
+docker compose --profile gpu run --rm --no-deps -T --entrypoint /app/.venv/bin/python -v "${PWD}/tools:/opt/plate/tools:ro" plate-sync /opt/plate/tools/vehicle_quantization.py collect --output /snapshots/quantization/vehicle_trial
+docker run --rm --gpus all --memory 5g --memory-swap 5g --cpus 2 --pids-limit 256 --env-file .env -e PLATE_WEIGHTS_DIR=/models -e OMP_NUM_THREADS=1 -e OPENBLAS_NUM_THREADS=1 -v "${PWD}/models/weights:/models:ro" -v "${PWD}/snapshots:/snapshots" plate-module-vms:quantize-int8 experiment --dataset /snapshots/quantization/vehicle_trial --output /snapshots/quantization/vehicle_trial/artifacts --workspace-mb 128 --iterations 60 --cooldown 0.05
+```
+
+Output gồm ONNX, engine FP16/INT8, cache calibration, thông tin layer và
+`report.json` với thời gian forward, preprocess + forward + NMS và mức khớp
+detection so với PyTorch FP32. Mức khớp này **không phải mAP/độ chính xác thực**
+vì chưa có nhãn ground truth. Dữ liệu một camera ban ngày chưa đủ để xác nhận
+mọi điều kiện. Engine phụ thuộc GPU/TensorRT; runtime camera vẫn dùng `.pt`,
+chỉ chuyển sang engine khi cấu hình rõ ràng.
+
+Chạy INT8 trong pipeline hiện tại: đặt engine vào `models/weights`, cấu hình
+`PLATE_VEHICLE_ENGINE` (tên file), `PLATE_VEHICLE_ENGINE_SHA256`, đồng thời giữ
+weight `.pt` tương ứng để lấy class metadata. Dùng `PLATE_GPU_IMAGE=plate-module-vms:detection-int8`,
+`PLATE_GPU_DOCKERFILE=Dockerfile.int8`, `PLATE_GPU_TARGET=runtime`, rồi chạy
+`docker compose --profile gpu up -d --build`. Dockerfile này tái sử dụng image
+TensorRT cục bộ `vehicle-bbox-experiment:trt10.13-v1`. Runtime kiểm tra SHA và
+input/output engine, dùng letterbox vuông và khôi phục bbox về frame gốc.
+OCR vẫn dùng model cũ. Để về PyTorch, bỏ hai biến engine và ba biến Docker GPU.
+Service GPU mặc định giới hạn 5 GB RAM, 2 CPU; điều chỉnh bằng
+`PLATE_GPU_MEMORY_LIMIT`, `PLATE_GPU_CPUS`.
+
+Thử ngày 29/10/2026 trên RTX 3050 Laptop 4 GB, 128 ảnh calibration + 32 ảnh
+kiểm tra, workspace 128 MB, giới hạn container 5 GB RAM/2 CPU: forward trung
+bình FP32 **16,56 ms**, TensorRT FP16 **20,01 ms**, INT8 **16,78 ms** (60 lượt,
+nghỉ 50 ms giữa lượt). Đây là phép thử giới hạn tải, chưa chứng minh INT8 nhanh
+hơn. INT8 khớp 201/216 detection FP32 tại IoU ≥ 0,5; FP16 khớp 216/216.
+Engine INT8 4,93 MB, FP16 8,47 MB. Báo cáo tại
+`snapshots/quantization/vehicle_20261029/artifacts/report.json`.
 
 Log `PLATE bbox worker started`, `MQTT bbox connected` xác nhận khởi động và kết
 nối. Mỗi lần publish có `topic`, `camera`, `object_key=frame:<sequence>` và result:

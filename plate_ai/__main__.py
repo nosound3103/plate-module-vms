@@ -39,13 +39,12 @@ def main():
                     (passage_settings.enabled and snapshot_settings.wait_seconds >= passage_settings.pending_ttl)
                     or (red_light_settings.enabled and snapshot_settings.wait_seconds >= red_light_settings.pending_ttl)):
                 raise ValueError("PLATE_SNAPSHOT_WAIT_SECONDS must be less than the event pending TTL")
-            tracking_enabled = passage_settings.enabled or bbox_settings.enabled or red_light_settings.enabled
+            tracking_enabled = (recognition_settings.enabled or passage_settings.enabled
+                                or bbox_settings.enabled or red_light_settings.enabled)
             if red_light_settings.enabled and not recognition_settings.enabled:
                 raise ValueError("RED_LIGHT_ENABLED requires PLATE_OCR_ENABLED=true")
             if passage_settings.enabled and not recognition_settings.enabled:
                 raise ValueError("PLATE_EVENTS_ENABLED requires PLATE_OCR_ENABLED=true")
-            if bbox_settings.enabled and not recognition_settings.enabled:
-                raise ValueError("PLATE_BBOX_ENABLED requires PLATE_OCR_ENABLED=true")
             if tracking_enabled and passage_settings.history_seconds < recognition_settings.max_result_age:
                 raise ValueError("PLATE_TRACK_HISTORY_SECONDS must cover PLATE_OCR_MAX_RESULT_AGE_SECONDS")
     except ValueError as error:
@@ -70,22 +69,27 @@ def main():
                     metadata_seconds=passage_settings.history_seconds,
                     evidence_frames=max(red_light_settings.frame_buffer if red_light_settings.enabled else 0,
                                         snapshot_settings.frame_buffer if snapshot_settings.enabled and passage_settings.enabled else 0)))
+                recognition = None
                 if recognition_settings.enabled:
                     from .recognition_runtime import RecognitionRuntime
-                    recognition = stack.enter_context(RecognitionRuntime(sync, detection, recognition_settings))
-                    if tracking_enabled:
-                        from .passage_runtime import PassageRuntime
-                        snapshots = None
-                        if snapshot_settings.enabled:
-                            from .snapshots import SnapshotService
-                            snapshots = stack.enter_context(SnapshotService(settings.broker_host, snapshot_settings))
-                        passages = stack.enter_context(PassageRuntime(sync, detection, recognition, passage_settings,
-                                                                     emit_events=passage_settings.enabled,
-                                                                     red_light_settings=red_light_settings,
-                                                                     snapshots=snapshots))
-                        if bbox_settings.enabled:
-                            from .bbox_runtime import BboxRuntime
-                            stack.enter_context(BboxRuntime(sync, passages, bbox_settings))
+                    recognition = RecognitionRuntime(sync, detection, recognition_settings)
+                if tracking_enabled:
+                    from .passage_runtime import PassageRuntime
+                    snapshots = None
+                    if snapshot_settings.enabled and (passage_settings.enabled or red_light_settings.enabled):
+                        from .snapshots import SnapshotService
+                        snapshots = stack.enter_context(SnapshotService(settings.broker_host, snapshot_settings))
+                    passages = stack.enter_context(PassageRuntime(sync, detection, recognition, passage_settings,
+                                                                 emit_events=passage_settings.enabled,
+                                                                 red_light_settings=red_light_settings,
+                                                                 snapshots=snapshots))
+                    if bbox_settings.enabled:
+                        from .bbox_runtime import BboxRuntime
+                        stack.enter_context(BboxRuntime(sync, passages, bbox_settings))
+                    if recognition is not None:
+                        recognition.track_source = passages
+                        # Tracking/bbox are live before loading or running OCR models.
+                        stack.enter_context(recognition)
             while not stop.wait(.5):
                 pass
     except Exception as error:

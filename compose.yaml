@@ -44,11 +44,14 @@ services:
   plate-sync:
     <<: *inference
     profiles: [gpu]
-    image: plate-module-vms:detection-cu128
+    mem_limit: "${PLATE_GPU_MEMORY_LIMIT:-5g}"
+    memswap_limit: "${PLATE_GPU_MEMORY_LIMIT:-5g}"
+    cpus: "${PLATE_GPU_CPUS:-2.0}"
+    image: "${PLATE_GPU_IMAGE:-plate-module-vms:detection-cu128}"
     build:
       context: .
-      dockerfile: Dockerfile
-      target: gpu
+      dockerfile: "${PLATE_GPU_DOCKERFILE:-Dockerfile}"
+      target: "${PLATE_GPU_TARGET:-gpu}"
       args:
         CUDA_BASE_IMAGE: "${CUDA_BASE_IMAGE:-multi-camera-ai:cu128}"
     gpus: all

@@ -22,6 +22,13 @@ class ConfigurationTests(unittest.TestCase):
                                                "PLATE_VEHICLE_CONFIDENCE": "0.6"})
         self.assertEqual((settings.device, settings.max_fps, settings.confidence), ("cuda:0", 8., .6))
 
+    def test_engine_requires_cuda_and_verified_filename(self):
+        for values in ({"vehicle_engine":"vehicle.engine"},
+                       {"vehicle_engine":"../vehicle.engine", "vehicle_engine_sha256":"a"*64, "device":"cuda:0"},
+                       {"vehicle_engine":"vehicle.engine", "vehicle_engine_sha256":"a"*64}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                DetectionSettings(**values)
+
     def test_invalid_limits_are_rejected(self):
         for name, value in (("PLATE_MAX_FPS", "nan"), ("PLATE_IMAGE_SIZE", "31"),
                             ("PLATE_VEHICLE_CONFIDENCE", "0"), ("PLATE_RTSP_READ_TIMEOUT_MS", "-1"),
@@ -65,6 +72,22 @@ class InferenceTests(unittest.TestCase):
         detector = self.synthetic_detector(torch.zeros((1, 1, 7)))
         self.assertEqual(detector.detect(np.zeros((100, 200, 3), dtype=np.uint8)), ())
 
+    def test_static_engine_letterbox_maps_back_to_landscape_frame(self):
+        detector = self.synthetic_detector(torch.tensor([[[320, 320, 200, 100, .9, .9, .1]]]))
+        detector.square_input = True
+        def forward(image):
+            self.assertEqual(tuple(image.shape), (1, 3, 640, 640))
+            return torch.tensor([[[320, 320, 200, 100, .9, .9, .1]]])
+        detector.model = forward
+        self.assertEqual(detector.detect(np.zeros((360, 640, 3), dtype=np.uint8))[0].bbox,
+                         (220, 130, 420, 230))
+
+    def test_static_engine_letterbox_maps_back_to_portrait_frame(self):
+        detector = self.synthetic_detector(torch.tensor([[[320, 320, 100, 200, .9, .9, .1]]]))
+        detector.square_input = True
+        self.assertEqual(detector.detect(np.zeros((640, 360, 3), dtype=np.uint8))[0].bbox,
+                         (130, 220, 230, 420))
+
     def test_checksum_mismatch_rejected_before_unpickle(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, DetectionSettings.vehicle_weight).write_bytes(b"invalid checkpoint")
@@ -73,6 +96,16 @@ class InferenceTests(unittest.TestCase):
 
 
 class ModelSmokeTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("PLATE_VEHICLE_ENGINE") and torch.cuda.is_available(), "TensorRT engine is not configured")
+    def test_configured_engine_cuda_forward(self):
+        from plate_ai.tensorrt_runtime import TensorRTEngine
+        detector = VehicleDetector(DetectionSettings.from_env())
+        self.assertIsInstance(detector.model, TensorRTEngine)
+        self.assertTrue(detector.square_input)
+        for shape in ((360, 640, 3), (640, 360, 3)):
+            self.assertIsInstance(detector.detect(np.zeros(shape, dtype=np.uint8)), tuple)
+        torch.cuda.synchronize()
+
     def test_checkpoint_load_and_cpu_forward(self):
         directory = Path(os.environ.get("PLATE_TEST_WEIGHTS", "/models"))
         self.assertTrue((directory/DetectionSettings.vehicle_weight).is_file(), "Provide the model artifact for smoke tests")

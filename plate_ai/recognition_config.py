@@ -40,6 +40,7 @@ class RecognitionSettings:
     max_result_age: float = 2.
     max_vehicles: int = 16
     max_plates_per_vehicle: int = 3
+    max_pending_results: int = 128
 
     def __post_init__(self):
         if {a.role for a in self.artifacts} != {a.role for a in ARTIFACTS} or len(self.artifacts) != len(ARTIFACTS):
@@ -50,7 +51,7 @@ class RecognitionSettings:
         for name in ("interval_seconds", "max_result_age"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        if min(self.max_vehicles, self.max_plates_per_vehicle) <= 0:
+        if min(self.max_vehicles, self.max_plates_per_vehicle, self.max_pending_results) <= 0:
             raise ValueError("Recognition limits must be positive")
 
     @classmethod
@@ -81,4 +82,5 @@ class RecognitionSettings:
             max_result_age=number("PLATE_OCR_MAX_RESULT_AGE_SECONDS", float, cls.max_result_age),
             max_vehicles=number("PLATE_OCR_MAX_VEHICLES", int, cls.max_vehicles),
             max_plates_per_vehicle=number("PLATE_OCR_MAX_PLATES_PER_VEHICLE", int, cls.max_plates_per_vehicle),
+            max_pending_results=number("PLATE_OCR_MAX_PENDING_RESULTS", int, cls.max_pending_results),
         )

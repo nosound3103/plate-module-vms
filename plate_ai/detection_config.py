@@ -23,8 +23,15 @@ class DetectionSettings:
     rtsp_transport: str = "tcp"
     torch_threads: int = 1
     shutdown_timeout_seconds: float = 12.
+    vehicle_engine: str = ""
+    vehicle_engine_sha256: str = ""
 
     def __post_init__(self):
+        if self.vehicle_engine:
+            if Path(self.vehicle_engine).name != self.vehicle_engine or not re.fullmatch(r"[a-fA-F0-9]{64}", self.vehicle_engine_sha256):
+                raise ValueError("Vehicle engine requires a filename and SHA-256 digest")
+            if self.device == "cpu":
+                raise ValueError("TensorRT vehicle engine requires CUDA")
         if self.device != "cpu" and not re.fullmatch(r"cuda(?::\d+)?", self.device):
             raise ValueError("PLATE_DEVICE must be cpu, cuda or cuda:<index>")
         if not self.vehicle_weight or Path(self.vehicle_weight).name != self.vehicle_weight:
@@ -72,4 +79,6 @@ class DetectionSettings:
             rtsp_transport=read("PLATE_RTSP_TRANSPORT", cls.rtsp_transport),
             torch_threads=number("PLATE_TORCH_THREADS", int, cls.torch_threads),
             shutdown_timeout_seconds=number("PLATE_SHUTDOWN_TIMEOUT_SECONDS", float, cls.shutdown_timeout_seconds),
+            vehicle_engine=env.get("PLATE_VEHICLE_ENGINE", "").strip(),
+            vehicle_engine_sha256=env.get("PLATE_VEHICLE_ENGINE_SHA256", "").strip(),
         )

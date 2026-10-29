@@ -29,6 +29,7 @@ class OverlaySnapshot:
     count_out: int
     traffic_light_points: tuple = ()
     traffic_light: object = None
+    detection_completed_monotonic: float = 0.
 
 
 def normalized_box(box):
@@ -59,7 +60,7 @@ def build_bbox_message(snapshot, organization_id, settings, *, clear=False):
             detections.append({"id": item.object_key, "global_id": item.object_key,
                                "track_id": item.track_id, "class": item.vehicle_type.lower(),
                                "confidence": round(item.confidence, 4), "bbox": box})
-            if item.plate_relative is None or now-item.plate_seen_at > settings.plate_max_age:
+            if item.plate_relative is None or (not item.plate_text and now-item.plate_seen_at > settings.plate_max_age):
                 continue
             x1, y1, x2, y2 = item.bbox
             rx1, ry1, rx2, ry2 = item.plate_relative

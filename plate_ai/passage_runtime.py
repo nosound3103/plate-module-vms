@@ -21,6 +21,7 @@ class _CameraState:
     lines_changed_at: float = 0.
     history: OrderedDict = field(default_factory=OrderedDict)
     last_ocr_key: tuple | None = None
+    ocr_revision: int = 0
     count_in: int = 0
     count_out: int = 0
     latest_metadata: object = None
@@ -57,7 +58,8 @@ class PassageRuntime:
         self._states, self._pending = {}, {}
         self._overlay_lock = threading.Lock()
         self._overlays = {}
-        self._stop = threading.Event()
+        self._recognition_targets, self._subscribers = {}, set()
+        self._stop, self._wake = threading.Event(), threading.Event()
         self._thread = threading.Thread(target=self._run, name="plate-passages", daemon=True)
         self._started = False
 
@@ -67,6 +69,8 @@ class PassageRuntime:
         if not self.detection.metadata_enabled:
             raise ValueError("Passage runtime requires detection metadata history")
         self._started = True
+        if hasattr(self.detection, "subscribe_updates"):
+            self.detection.subscribe_updates(self._wake)
         self._thread.start()
         LOGGER.info("PLATE passage worker started events_enabled=%s ocr_wait_seconds=%.1f max_pending=%d",
                     self.emit_events, self.settings.ocr_wait_seconds, self.settings.max_pending)
@@ -79,6 +83,30 @@ class PassageRuntime:
             return None
         current = next((c.camera for c in self.sync.snapshot().cameras if c.camera.code == camera_code), None)
         return snapshot if current == snapshot.camera else None
+
+    def subscribe_updates(self, event):
+        with self._overlay_lock:
+            self._subscribers.add(event)
+        event.set()
+
+    def unsubscribe_updates(self, event):
+        with self._overlay_lock:
+            self._subscribers.discard(event)
+
+    def wake(self):
+        self._wake.set()
+
+    def recognition_targets(self, detected):
+        """Immutable indices/track identities; exposed only after the fast overlay."""
+        with self._overlay_lock:
+            entry = self._recognition_targets.get(detected.camera.code)
+        if entry is None:
+            return None
+        metadata, targets, active = entry
+        if (metadata.camera != detected.camera or metadata.sequence != detected.frame.sequence
+                or metadata.received_monotonic != detected.frame.received_monotonic):
+            return None
+        return targets, active
 
     def __enter__(self):
         return self.start()
@@ -134,22 +162,39 @@ class PassageRuntime:
                 track.sides[line.id] = (side, point)
 
     def _recognize(self, state):
-        result = self.recognition.latest(state.camera.code)
-        if result is None or result.camera != state.camera:
+        if self.recognition is None:
             return
-        key = (result.sequence, result.received_monotonic)
-        if key == state.last_ocr_key:
-            return
-        state.last_ocr_key = key
-        associations = state.history.get(key)
-        if associations is None:
-            LOGGER.debug("PLATE OCR association camera=%s sequence=%d result=NO_FRAME_HISTORY",
-                         state.camera.code, result.sequence)
-            return
-        for read in result.vehicles:
-            track = associations.get(read.detection_index)
-            if track is not None:
-                track.remember(read, result.received_monotonic)
+        if hasattr(self.recognition, "drain"):
+            results = self.recognition.drain(state.camera.code)
+        else:
+            result = self.recognition.latest(state.camera.code)
+            results = (result,) if result is not None else ()
+        for result in results:
+            if result.camera != state.camera:
+                continue
+            key = (result.sequence, result.received_monotonic)
+            if not hasattr(self.recognition, "drain") and key == state.last_ocr_key:
+                continue
+            associations = state.history.get(key, {})
+            for read in result.vehicles:
+                track = associations.get(read.detection_index)
+                if read.object_key is not None:
+                    if track is None:
+                        track = next((t for t in state.tracker.tracks.values() if t.object_key == read.object_key), None)
+                    if track is None:
+                        pending = self._pending.get(read.object_key)
+                        if pending is not None and pending[0] == state.camera:
+                            track = pending[1]
+                    if track is None and self.red_events:
+                        track = next((item[1].track for item in self.red_events.pending.values()
+                                      if item[0] == state.camera and item[1].track.object_key == read.object_key), None)
+                    if track is None or track.object_key != read.object_key:
+                        continue
+                if track is not None:
+                    track.remember(read, result.received_monotonic)
+            # Each drained result can contain one track from the same frame.
+            state.last_ocr_key = key
+            state.ocr_revision += 1
 
     def _flush(self, now):
         for key, (camera, track) in tuple(self._pending.items()):
@@ -194,6 +239,7 @@ class PassageRuntime:
 
     def _run(self):
         while not self._stop.is_set():
+            self._wake.clear()
             try:
                 configs = {c.camera.code: c for c in self.sync.snapshot().cameras}
                 for code, state in tuple(self._states.items()):
@@ -203,6 +249,7 @@ class PassageRuntime:
                         del self._states[code]
                         with self._overlay_lock:
                             self._overlays.pop(code, None)
+                            self._recognition_targets.pop(code, None)
                         LOGGER.info("PLATE tracking removed camera=%s", code)
                 for code, config in configs.items():
                     try:
@@ -214,7 +261,7 @@ class PassageRuntime:
                     self.red_events.flush(time.monotonic())
             except Exception as error:
                 LOGGER.error("PLATE passage controller failed type=%s", type(error).__name__)
-            self._stop.wait(.02)
+            self._wake.wait(.02)
 
     def _process_camera(self, code, config):
         now = time.monotonic()
@@ -238,6 +285,8 @@ class PassageRuntime:
             if metadata.received_monotonic < state.lines_changed_at:
                 continue
             self._observe(state, metadata)
+            # Publish tracked geometry before HSV, preview copies or OCR work.
+            self._publish_overlay(state)
             if self.red_events:
                 try:
                     self._observe_red(state, metadata)
@@ -253,9 +302,12 @@ class PassageRuntime:
             state.history.popitem(last=False)
         self._recognize(state)
         state.tracker.expire(now)
+        self._publish_overlay(state)
+
+    def _publish_overlay(self, state):
         metadata = state.latest_metadata
         if metadata is not None:
-            key = (metadata.sequence, metadata.received_monotonic, state.last_ocr_key)
+            key = (metadata.sequence, metadata.received_monotonic, state.ocr_revision, state.light)
             if key == state.overlay_key:
                 return
             state.overlay_key = key
@@ -265,9 +317,15 @@ class PassageRuntime:
                                for t in state.visible.values())
             snapshot = OverlaySnapshot(state.camera, metadata.sequence, metadata.captured_at,
                                        metadata.received_monotonic, detections, state.count_in, state.count_out,
-                                       state.light_points, state.light)
+                                       state.light_points, state.light, metadata.completed_monotonic)
+            targets = tuple((i, t.object_key) for i, t in state.visible.items() if t.best_read() is None)
+            active = frozenset(t.object_key for t in state.tracker.tracks.values())
             with self._overlay_lock:
-                self._overlays[code] = snapshot
+                self._overlays[state.camera.code] = snapshot
+                self._recognition_targets[state.camera.code] = (metadata, targets, active)
+                subscribers = tuple(self._subscribers)
+            for event in subscribers:
+                event.set()
 
     def _configure_red(self, state, zones, now):
         from .red_light import RedLightViolationDetector, TrafficLightStateTracker
@@ -336,6 +394,9 @@ class PassageRuntime:
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
+        if hasattr(self.detection, "unsubscribe_updates"):
+            self.detection.unsubscribe_updates(self._wake)
         if self._thread.ident is not None:
             self._thread.join(self.detection.settings.shutdown_timeout_seconds)
         stopped = not self._thread.is_alive()
@@ -350,6 +411,7 @@ class PassageRuntime:
             self._states.clear()
             with self._overlay_lock:
                 self._overlays.clear()
+                self._recognition_targets.clear()
         else:
             LOGGER.error("PLATE passage shutdown exceeded timeout")
         return stopped

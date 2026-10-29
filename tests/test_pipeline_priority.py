@@ -1,4 +1,6 @@
 from dataclasses import replace
+import os
+from tempfile import TemporaryDirectory
 import threading
 import time
 from types import SimpleNamespace
@@ -80,6 +82,100 @@ class Detection:
 
 
 class PriorityTests(unittest.TestCase):
+    def test_bbox_advances_while_red_light_snapshot_upload_is_blocked(self):
+        from plate_ai.snapshots import SnapshotService
+        from plate_ai.snapshot_config import SnapshotSettings
+        from plate_ai.red_light import Violation, LightObservation
+        from plate_ai.red_light_config import RedLightSettings
+        from plate_ai.red_light_events import RedLightEventPublisher
+        from plate_ai.tracking import Track
+        entered, release = threading.Event(), threading.Event()
+        sent, events = [], []
+        def upload(camera, image, *, object_key):
+            entered.set()
+            if not release.wait(10.):
+                raise TimeoutError("test upload was not released")
+            return "plate/marked.jpg" if object_key.endswith(":annotated") else "plate/original.jpg"
+        with TemporaryDirectory() as directory:
+            with SnapshotService("unused", replace(SnapshotSettings(), wait_seconds=20.),
+                                 client=SimpleNamespace(upload=upload)) as storage:
+                self.assertNotEqual(storage.image_executor.submit(os.getpid).result(timeout=3), os.getpid())
+                sync, detection = Sync(), Detection()
+                passages = PassageRuntime(sync, detection, None, PassageSettings(),
+                                          publish=lambda *a, **k: True, emit_events=False)
+                publisher = RedLightEventPublisher(replace(RedLightSettings(), snapshot_dir=directory,
+                                                            ocr_wait_seconds=.01),
+                                                   lambda event, **_: events.append(event) or True, snapshots=storage)
+                self.assertIs(publisher.executor, storage.image_executor)
+                passages.red_events = publisher
+                passages._configure_red = lambda *args: None
+                passages._observe_red = lambda *args: None
+                boxes = BboxRuntime(sync, passages, BboxSettings(max_fps=200., max_frame_age=1.),
+                                    publish=lambda message, **_: sent.append(message) or True)
+                passages.start()
+                boxes.start()
+                try:
+                    wait_for(lambda: CAMERA.code in passages._states)
+                    for index in range(3):
+                        t = Track(index+1, f"violation-track-{index}", (.1, .1, .4, .6), CAR, 100.)
+                        t.remember(VehicleRecognition(0, CAR, PlateRecognition(f"30A{12345+index}", .9,
+                                                                               (18, 40, 32, 50), .9)),
+                                   captured_at=99., sequence=1, identity_epoch=0)
+                        publisher.submit(CAMERA, Violation(t, 100., .9, np.zeros((100, 100, 3), np.uint8),
+                                         100., 1, LightObservation("RED", .9, {}, 100.),
+                                         ((0., 0.), (.2, 0.), (.2, .2), (0., .2))))
+                    self.assertTrue(entered.wait(5.))
+                    for seq in range(1, 6):
+                        detection.emit(seq, (replace(CAR, bbox=(10+seq, 10, 40+seq, 60)),))
+                        wait_for(lambda: any(m["frame_sequence"] == seq and m["detections"] for m in sent))
+                    self.assertFalse(events)
+                    self.assertFalse(release.is_set())
+                    release.set()
+                    wait_for(lambda: len(events) == 3)
+                    self.assertEqual(len({event["entity_id"] for event in events}), 3)
+                    self.assertTrue(all(event["snapshot_url"] == "plate/marked.jpg" for event in events))
+                finally:
+                    release.set()
+                    boxes.stop()
+                    passages.stop()
+
+    def test_slow_preview_render_does_not_hold_bbox_lock_or_stop_next_frame(self):
+        entered, release = threading.Event(), threading.Event()
+        sync, detection, sent = Sync(), Detection(), []
+        passages = PassageRuntime(sync, detection, None, PassageSettings(),
+                                  publish=lambda *a, **k: True, emit_events=False)
+        boxes = BboxRuntime(sync, passages, BboxSettings(max_fps=200., max_frame_age=1.),
+                            publish=lambda message, **_: sent.append(message) or True)
+        passages.start()
+        boxes.start()
+        preview_thread = None
+        try:
+            wait_for(lambda: CAMERA.code in passages._states)
+            detection.emit(1)
+            wait_for(lambda: bool(sent))
+            state = passages._states[CAMERA.code]
+            state.preview = (np.zeros((100, 100, 3), np.uint8), (((.1, .1, .4, .6), 1, ""),),
+                             0, 0, (), None)
+            def draw(*args, **kwargs):
+                entered.set()
+                release.wait(3.)
+            with patch("cv2.rectangle", side_effect=draw):
+                preview_thread = threading.Thread(target=passages.latest_preview, args=(CAMERA.code,))
+                preview_thread.start()
+                self.assertTrue(entered.wait(1.))
+                detection.emit(2)
+                wait_for(lambda: any(m["frame_sequence"] == 2 for m in sent))
+                self.assertFalse(release.is_set())
+                release.set()
+                preview_thread.join(2.)
+                self.assertFalse(preview_thread.is_alive())
+        finally:
+            release.set()
+            if preview_thread:
+                preview_thread.join(2.)
+            boxes.stop()
+            passages.stop()
+
     def test_ocr_enrichment_reserves_capacity_for_next_vehicle_frame(self):
         sync, sent = Sync(), []
         runtime = BboxRuntime(sync, None, BboxSettings(max_fps=10.),

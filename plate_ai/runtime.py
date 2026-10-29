@@ -38,6 +38,7 @@ class _CameraState:
     reader: LatestFrameStream
     next_inference_at: float = 0.
     next_log_at: float = 0.
+    last_input_at: float = 0.
 
 
 class DetectionRuntime:
@@ -176,6 +177,10 @@ class DetectionRuntime:
                 frame = state.reader.latest()
                 if frame is None or now-frame.received_monotonic > self.settings.max_frame_age:
                     continue
+                if state.last_input_at and frame.received_monotonic-state.last_input_at > self.settings.max_frame_age:
+                    LOGGER.warning("Vehicle input camera=%s sequence=%d result=FRAME_GAP gap_ms=%.1f",
+                                   code, frame.sequence, (frame.received_monotonic-state.last_input_at)*1000)
+                state.last_input_at = frame.received_monotonic
                 with self._lock:
                     if self._states.get(code) is not state:
                         continue

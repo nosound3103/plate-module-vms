@@ -23,6 +23,17 @@ def event(key, occurred=100., *, plate="30A-12345", kind=None, camera="camera-uu
 
 
 class OutboxTests(unittest.TestCase):
+    def test_disabling_recognition_also_blocks_previously_pending_in_out_events(self):
+        self.accept(event("pending-in-out"))
+        self.accept(event("red-light", plate="99B12345", kind="RED_LIGHT"))
+        self.delivery.recognition_enabled = False
+        self.delivery._deliver(self.db, 1004.)
+        self.assertEqual([e["entity_id"] for e in self.sent], ["red-light"])
+        self.assertEqual(self.state("pending-in-out"), "PENDING")
+        self.delivery.recognition_enabled = True
+        self.delivery._deliver(self.db, 1006.)
+        self.assertEqual([e["entity_id"] for e in self.sent], ["red-light", "pending-in-out"])
+
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.settings = EventDeliverySettings(state_path=str(Path(self.directory.name)/"events.sqlite3"))

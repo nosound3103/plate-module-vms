@@ -116,13 +116,28 @@ class PassageRuntime:
 
     def latest_preview(self, camera_code):
         """Native preview frame with vehicle/count/traffic annotations; original stays untouched."""
+        import cv2
+        from .red_light import draw_traffic_light
         snapshot = self.latest_overlay(camera_code)
         with self._overlay_lock:
             state = self._states.get(camera_code)
             if (snapshot is None or state is None or state.preview is None
                     or time.monotonic()-snapshot.received_monotonic > self.detection.settings.max_frame_age):
                 return None
-            return state.preview.copy()
+            source, vehicles, count_in, count_out, light_points, light = state.preview
+        # Preview drawing is optional and never holds the bbox snapshot lock.
+        preview = source.copy()
+        h, w = preview.shape[:2]
+        for box, identity, plate in vehicles:
+            x1, y1, x2, y2 = (int(v*(w if i % 2 == 0 else h)) for i, v in enumerate(box))
+            cv2.rectangle(preview, (x1, y1), (x2, y2), (255, 180, 0), 2)
+            cv2.putText(preview, f"#{identity} {plate}", (max(0, x1), max(15, y1)),
+                        cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 180, 0), 1)
+        cv2.putText(preview, f"IN: {count_in} | OUT: {count_out}", (4, max(15, h-8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 255, 0), 1)
+        if light_points:
+            draw_traffic_light(preview, light_points, light, debug=self.red_settings.debug)
+        return preview
 
     def __exit__(self, *_):
         self.stop()
@@ -156,9 +171,11 @@ class PassageRuntime:
                     if self.emit_events and len(self._pending) < self.settings.max_pending:
                         self._pending[track.object_key] = (state.camera, track)
                         if self.snapshots:
+                            from .passage_evidence import PassageAnnotation
                             captured = self.detection.frame_for(metadata)
                             self._snapshot_futures[track.object_key] = self.snapshots.submit(
-                                state.camera, captured.image if captured else None, object_key=track.object_key)
+                                state.camera, captured.image if captured else None, object_key=track.object_key,
+                                annotation=PassageAnnotation(tuple(track.box), track.id, track.direction))
                         LOGGER.info("PLATE crossing camera=%s object_key=%s line=%s direction=%s result=PENDING_OCR",
                                     state.camera.code, track.object_key, line.id, track.direction)
                     elif self.emit_events:
@@ -369,8 +386,7 @@ class PassageRuntime:
                    "CONFIG_ENABLED" if valid else "DISABLED_MISSING_OR_INVALID_ZONES")
 
     def _observe_red(self, state, metadata):
-        from .red_light import LightObservation, draw_traffic_light
-        import cv2
+        from .red_light import LightObservation
         if metadata.received_monotonic < state.red_changed_at:
             return
         captured = self.detection.frame_for(metadata)
@@ -395,19 +411,9 @@ class PassageRuntime:
                     self.red_events.submit(state.camera, event)
             else:
                 state.red_detector.states.clear()
-        preview = frame.copy()
-        h, w = preview.shape[:2]
-        for track in state.visible.values():
-            x1, y1, x2, y2 = (int(v*(w if i % 2 == 0 else h)) for i, v in enumerate(track.box))
-            cv2.rectangle(preview, (x1, y1), (x2, y2), (255, 180, 0), 2)
-            cv2.putText(preview, f"#{track.id} {track.plate_text}", (max(0, x1), max(15, y1)),
-                        cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 180, 0), 1)
-        cv2.putText(preview, f"IN: {state.count_in} | OUT: {state.count_out}", (4, max(15, h-8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 255, 0), 1)
-        if state.light_points:
-            draw_traffic_light(preview, state.light_points, state.light, debug=self.red_settings.debug)
         with self._overlay_lock:
-            state.preview = preview
+            state.preview = (frame, tuple((tuple(t.box), t.id, t.plate_text) for t in state.visible.values()),
+                             state.count_in, state.count_out, state.light_points, state.light)
 
     def stop(self):
         self._stop.set()

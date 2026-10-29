@@ -18,6 +18,7 @@ class BboxRuntime:
         self.publish = publish
         self._budget, self._refill_at, self._last, self._visible = {}, {}, {}, {}
         self._sent, self._log_at = {}, {}
+        self._queued_at = {}
         self._cursor = 0
         self._stop, self._wake = threading.Event(), threading.Event()
         self._thread = threading.Thread(target=self._run, name="plate-bbox", daemon=True)
@@ -55,6 +56,16 @@ class BboxRuntime:
         if queued:
             self._visible[snapshot.camera.code] = bool(message["detections"])
             now = time.monotonic()
+            if clear:
+                LOGGER.warning("PLATE bbox camera=%s sequence=%d result=CLEARED age_ms=%.1f",
+                               snapshot.camera.code, snapshot.sequence,
+                               (now-snapshot.received_monotonic)*1000)
+            else:
+                previous = self._queued_at.get(snapshot.camera.code)
+                if previous is not None and now-previous > self.settings.max_frame_age:
+                    LOGGER.warning("PLATE bbox camera=%s sequence=%d result=RESUMED queue_gap_ms=%.1f",
+                                   snapshot.camera.code, snapshot.sequence, (now-previous)*1000)
+                self._queued_at[snapshot.camera.code] = now
             if not clear and now >= self._log_at.get(snapshot.camera.code, 0.):
                 completed = snapshot.detection_completed_monotonic
                 LOGGER.info("PLATE bbox camera=%s sequence=%d detection_to_queue_ms=%.1f frame_age_ms=%.1f result=QUEUED",
@@ -98,6 +109,7 @@ class BboxRuntime:
                         self._refill_at.pop(code, None)
                         self._sent.pop(code, None)
                         self._log_at.pop(code, None)
+                        self._queued_at.pop(code, None)
                 codes = list(configs)
                 if codes:
                     # Rotate the first camera so a busy MQTT socket cannot
@@ -139,6 +151,7 @@ class BboxRuntime:
             self._refill_at.clear()
             self._sent.clear()
             self._log_at.clear()
+            self._queued_at.clear()
         else:
             LOGGER.error("PLATE bbox shutdown exceeded timeout")
         return stopped

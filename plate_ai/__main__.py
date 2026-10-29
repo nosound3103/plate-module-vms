@@ -96,7 +96,8 @@ def main():
                             sync.transport.publication_status,
                             eligible=lambda identity, code: any(c.camera.id == identity and c.camera.code == code
                                                                  for c in sync.snapshot().cameras),
-                            guard_seconds=red_light_settings.dedup_guard_seconds))
+                            guard_seconds=red_light_settings.dedup_guard_seconds,
+                            recognition_enabled=passage_settings.enabled))
                         if red_light_settings.enabled:
                             logging.getLogger(__name__).warning(
                                 "RED_LIGHT requires backend event-kind dedup and entity_id idempotency; "

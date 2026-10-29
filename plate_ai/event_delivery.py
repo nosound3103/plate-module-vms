@@ -65,9 +65,11 @@ class EventDeliverySettings:
 class EventDelivery:
     manages_delivery = True
 
-    def __init__(self, settings, publish, status=None, *, eligible=None, guard_seconds=1.25):
+    def __init__(self, settings, publish, status=None, *, eligible=None, guard_seconds=1.25,
+                 recognition_enabled=True):
         self.settings, self.publish, self.status = settings, publish, status
         self.eligible, self.guard = eligible, guard_seconds
+        self.recognition_enabled = recognition_enabled
         self._queue = queue.Queue(settings.max_pending)
         self._lock = threading.Lock()
         self._results = OrderedDict()
@@ -219,6 +221,8 @@ class EventDelivery:
                 LOGGER.error("PLATE outbox camera=%s object_key=%s result=EXPIRED_NOT_DELIVERED", row["camera_code"], key)
                 continue
             if now < self._retry_at.get(key, 0.) or sent >= 8:
+                continue
+            if row["kind"] == "RECOGNITION" and not self.recognition_enabled:
                 continue
             if row["kind"] == "RECOGNITION" and now-row["created"] < self.settings.recognition_hold_seconds:
                 continue

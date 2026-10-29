@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 import cv2
+from .image_work import image_executor, encode_snapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class SnapshotService:
         self.client = client if client is not None else StorageClient(host, settings)
         self._slots = threading.BoundedSemaphore(settings.max_pending)
         self._executor = ThreadPoolExecutor(max_workers=settings.workers, thread_name_prefix="plate-snapshot")
+        self.image_executor = image_executor()
 
     def __enter__(self):
         return self
@@ -89,7 +91,7 @@ class SnapshotService:
     def __exit__(self, *_):
         self.stop()
 
-    def submit(self, camera, frame, *, object_key, local_dir=None):
+    def submit(self, camera, frame, *, object_key, local_dir=None, annotation=None):
         if frame is None or not self._slots.acquire(blocking=False):
             LOGGER.warning("Snapshot camera=%s event=%s result=%s", camera.code, object_key,
                            "NO_MATCHING_FRAME" if frame is None else "QUEUE_FULL")
@@ -97,27 +99,23 @@ class SnapshotService:
             future.set_result(None)
             return future
         try:
-            future = self._executor.submit(self._prepare, camera, frame, object_key, local_dir, time.monotonic())
+            future = self._executor.submit(self._prepare, camera, frame, object_key, local_dir, time.monotonic(), annotation)
         except Exception:
             self._slots.release()
             raise
         future.add_done_callback(lambda _: self._slots.release())
         return future
 
-    def _prepare(self, camera, frame, object_key, local_dir, created):
+    def _prepare(self, camera, frame, object_key, local_dir, created, annotation):
         if time.monotonic()-created >= self.settings.wait_seconds:
             return None
-        if local_dir:
-            try:
-                save_original(frame, local_dir)
-            except Exception as error:
-                LOGGER.error("Snapshot camera=%s event=%s result=LOCAL_SAVE_FAILED type=%s",
-                             camera.code, object_key, type(error).__name__)
         try:
-            ok, image = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.settings.jpeg_quality])
-            if not ok:
-                raise ValueError("JPEG encoding failed")
-            return self.client.upload(camera, image.tobytes(), object_key=object_key)
+            # Only this background network worker waits for the CPU process.
+            image = self.image_executor.submit(encode_snapshot, frame, self.settings.jpeg_quality,
+                                               local_dir, annotation).result()
+            if time.monotonic()-created >= self.settings.wait_seconds:
+                return None
+            return self.client.upload(camera, image, object_key=object_key)
         except Exception as error:
             LOGGER.error("Snapshot camera=%s event=%s result=PREPARE_FAILED type=%s",
                          camera.code, object_key, type(error).__name__)
@@ -138,3 +136,4 @@ class SnapshotService:
 
     def stop(self):
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self.image_executor.shutdown(wait=False, cancel_futures=True)

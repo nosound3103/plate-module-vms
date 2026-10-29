@@ -155,6 +155,55 @@ class AsyncSnapshotTests(unittest.TestCase):
 
 
 class SnapshotEventTests(unittest.TestCase):
+    def test_in_out_images_mark_only_frozen_crossing_vehicle_with_direction_color(self):
+        for direction, positions in (("IN", (.4, .44, .48, .54)), ("OUT", (.6, .56, .52, .46))):
+            client = Mock()
+            client.upload.return_value = KEY
+            original = np.zeros((400, 400, 3), np.uint8)
+            sync = SimpleNamespace(snapshot=lambda: SimpleNamespace(cameras=(SimpleNamespace(camera=CAMERA),)))
+            detection = SimpleNamespace(frame_for=lambda m: CapturedFrame(m.sequence, m.captured_at,
+                                                                          m.received_monotonic, original))
+            with SnapshotService("unused", SnapshotSettings(), client=client) as storage:
+                runtime = PassageRuntime(sync, detection, None, PassageSettings(), publish=Mock(), snapshots=storage)
+                state = _CameraState(CAMERA, VehicleTracker(CAMERA.code, PassageSettings()),
+                                     lines=(CrossingLine("line", ((.1, .5), (.9, .5))),))
+                for index, y in enumerate(positions):
+                    vehicle = VehicleDetection("CAR", .9, (160, round((y-.2)*400), 240, round(y*400)))
+                    runtime._observe(state, DetectionMetadata(CAMERA, index, 100+index*.1,
+                                                             time.monotonic(), 400, 400, (vehicle,)))
+                key, (_, track) = next(iter(runtime._pending.items()))
+                box = track.box
+                self.assertEqual(track.direction, direction)
+                track.box = (.75, .7, .95, .95)
+                runtime._snapshot_futures[key].result(timeout=3)
+                marked = cv2.imdecode(np.frombuffer(client.upload.call_args.args[1], np.uint8), cv2.IMREAD_COLOR)
+                b, g, r = map(int, marked[round((box[1]+box[3])/2*399), round(box[0]*399)])
+                if direction == "IN":
+                    self.assertGreater(g, max(b, r)+60)
+                    self.assertEqual((state.count_in, state.count_out), (1, 0))
+                else:
+                    self.assertGreater(r, 150)
+                    self.assertGreater(g, 80)
+                    self.assertLess(b, 60)
+                    self.assertEqual((state.count_in, state.count_out), (0, 1))
+                self.assertLess(int(marked[320, 300].max()), 20)
+                self.assertFalse(original.any())
+
+    def test_disabled_passage_events_do_not_queue_snapshots_or_publish_but_still_count(self):
+        storage, publish = Mock(), Mock()
+        runtime = PassageRuntime(SimpleNamespace(), None, None, PassageSettings(),
+                                  publish=publish, snapshots=storage, emit_events=False)
+        state = _CameraState(CAMERA, VehicleTracker(CAMERA.code, PassageSettings()),
+                             lines=(CrossingLine("line", ((.1, .5), (.9, .5))),))
+        for index, y in enumerate((.4, .44, .48, .54)):
+            vehicle = VehicleDetection("CAR", .9, (40, round((y-.2)*100), 60, round(y*100)))
+            runtime._observe(state, DetectionMetadata(CAMERA, index, 100+index*.1,
+                                                     time.monotonic(), 100, 100, (vehicle,)))
+        self.assertEqual((state.count_in, state.count_out), (1, 0))
+        self.assertFalse(runtime._pending)
+        storage.submit.assert_not_called()
+        publish.assert_not_called()
+
     def test_normal_crossing_upload_then_mqtt_retry_reuses_image_and_event(self):
         client = Mock()
         client.upload.return_value = KEY

@@ -1,5 +1,5 @@
 """PLATE-compatible evidence delivery using the existing asynchronous MQTT client."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import logging
@@ -8,6 +8,7 @@ import time
 from .events import build_plate_event
 from .red_light_config import RedLightSettings
 from .red_light_evidence import prepare_evidence, write_manifest, upload_evidence
+from .image_work import image_executor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -111,7 +112,10 @@ class RedLightEventPublisher:
         self.settings, self.publish = settings, publish
         self.snapshots = snapshots
         self.pending = {}
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="red-light-evidence")
+        shared = getattr(snapshots, "image_executor", None)
+        self._owns_executor = not isinstance(shared, ProcessPoolExecutor)
+        self.executor = image_executor() if self._owns_executor else shared
+        self._uploads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="red-light-upload")
 
     def submit(self, camera, violation):
         if (violation.frame is None or violation.signal is None or violation.signal.state != "RED"
@@ -125,7 +129,8 @@ class RedLightEventPublisher:
         key = f"{violation.track_key}:RED_LIGHT"
         if key in self.pending:
             return
-        future = self.executor.submit(prepare_evidence, camera, violation, self.settings.snapshot_dir)
+        # The process needs the immutable crossing snapshot, never the live track.
+        future = self.executor.submit(prepare_evidence, camera, replace(violation, track=None), self.settings.snapshot_dir)
         # Future owns the frame until saved; do not retain a second reference for OCR wait.
         self.pending[key] = [camera, replace(violation, frame=None), time.monotonic(), future, None, 0., None, None]
         LOGGER.info("RED_LIGHT camera=%s track=%s result=PENDING_OCR_EVIDENCE", camera.code, violation.track.id)
@@ -164,7 +169,7 @@ class RedLightEventPublisher:
                             # Lock the verified OCR before drawing/uploading the viewing copy.
                             violation = replace(violation, read_at_crossing=violation_read(violation, self.settings))
                             item[1] = violation
-                            item[7] = self.executor.submit(upload_evidence, camera, files, self.snapshots, key,
+                            item[7] = self._uploads.submit(upload_evidence, camera, files, self.snapshots, key,
                                                            violation, violation.read_at_crossing.read.license_plate.text)
                         if not item[7].done():
                             continue
@@ -208,5 +213,6 @@ class RedLightEventPublisher:
         if self.pending:
             LOGGER.warning("RED_LIGHT result=STOPPED_NOT_PERSISTED pending=%d", len(self.pending))
         self.pending.clear()
-        if self.executor:
+        self._uploads.shutdown(wait=False, cancel_futures=True)
+        if self._owns_executor:
             self.executor.shutdown(wait=False, cancel_futures=True)

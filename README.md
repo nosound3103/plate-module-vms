@@ -294,6 +294,16 @@ Luồng xử lý: **vehicle detection → tracking → bbox MQTT**, sau đó OCR
 thông tin lên cùng track. Bbox được đánh thức ngay khi có geometry mới, trước HSV
 và tạo preview; không chờ OCR hay snapshot. Detection và tracker dùng chung cho
 counting, đèn đỏ và OCR. Bbox vẫn chạy khi `PLATE_OCR_ENABLED=false`.
+Copy/vẽ preview chỉ thực hiện khi có yêu cầu xem, ngoài khóa overlay. Mã hóa
+JPEG, lưu PNG và metadata bằng chứng dùng chung một process CPU (không model),
+một worker OpenCV, ưu tiên thấp trên Linux/Docker; HTTP vẫn ở thread nền riêng.
+Process được khởi tạo trước khi chạy tracking để không chậm lần crossing đầu.
+Log `FRAME_GAP`, bbox `CLEARED` và `RESUMED queue_gap_ms` giúp phân biệt thiếu
+frame đầu vào với gián đoạn gửi MQTT. Không giữ bbox quá hạn để che mất frame.
+Với detection 5 FPS, nếu log `CLEARED age_ms=30x` xuất hiện xen kẽ frame mới,
+có thể đặt `PLATE_BBOX_MAX_FRAME_AGE_SECONDS=0.5` để chịu jitter lịch chạy trong
+hai chu kỳ detection. Đây là hạn sử dụng kết quả thật, không trì hoãn gửi frame
+mới và không tạo bbox dự đoán; mặc định chặt hơn vẫn là 0.3 giây.
 
 Một worker OCR dùng chung năm model cho tất cả camera. Worker chỉ chọn track
 chưa có biển từ frame detection mới nhất đã được tracking; không xếp hàng ảnh.
@@ -797,8 +807,17 @@ PLATE_SNAPSHOT_JPEG_QUALITY=90
 Mặc định bật upload, giới hạn ảnh 10 MB, timeout mỗi request 4 giây và tối đa
 hai lần thử cho lỗi mạng/429/5xx. Lỗi 403/413/422 không retry. Quá 10 giây chờ,
 queue đầy hoặc upload lỗi vẫn publish event với `snapshot_url: null` và ghi log.
+Ảnh sự kiện qua vạch khoanh đúng bbox xe tại frame crossing, nhãn `IN ID:...`
+màu xanh lá hoặc `OUT ID:...` màu cam; không lấy vị trí track mới sau khi chờ OCR.
+Vẽ trên bản copy trong process ảnh, không sửa frame camera và không chặn bbox.
 Thời gian chờ phải nhỏ hơn TTL event. HTTP retry có thể để lại ảnh không được
 tham chiếu nếu server đã lưu nhưng response bị mất; không tạo thêm event MQTT.
+
+Test local không gửi mạng: `PLATE_SNAPSHOT_ENABLED=false` và
+`PLATE_EVENTS_ENABLED=false` tắt upload và event IN/OUT; counting/bbox vẫn chạy.
+IN/OUT còn trong outbox cũng không được gửi khi cờ events tắt. Nếu chạy camera
+local với đèn đỏ, đặt thêm `RED_LIGHT_ENABLED=false` để tắt cả event RED_LIGHT;
+unit/integration tests dùng publisher giả lập và Docker `--network none`.
 
 Kiểm tra ảnh qua `https://MQTT_HOST/api/v1/snapshot/image?object_key=<object_key>`.
 Test: `python -m unittest discover -s tests -p test_snapshots.py -v` trong Docker

@@ -19,7 +19,7 @@ from plate_ai.detection import VehicleDetection
 from plate_ai.passage_config import PassageSettings
 from plate_ai.passage_runtime import PassageRuntime, _CameraState
 from plate_ai.recognition import PlateRecognition, VehicleRecognition
-from plate_ai.red_light import Violation
+from plate_ai.red_light import Violation, LightObservation
 from plate_ai.red_light_config import RedLightSettings
 from plate_ai.red_light_events import RedLightEventPublisher
 from plate_ai.rtsp import CapturedFrame
@@ -45,7 +45,7 @@ def vehicle_track():
     vehicle = VehicleDetection("CAR", .9, (10, 10, 40, 60))
     track = Track(1, "actual-track", (.1, .1, .4, .6), vehicle, time.monotonic(),
                   direction="OUT", crossed_epoch=100., crossed_monotonic=time.monotonic()-3)
-    track.remember(VehicleRecognition(0, vehicle, PlateRecognition("30A-12345", .85)))
+    track.remember(VehicleRecognition(0, vehicle, PlateRecognition("30A-12345", .85, (12, 45, 38, 58), .9)), captured_at=99., sequence=1, identity_epoch=0)
     return track
 
 
@@ -206,26 +206,35 @@ class SnapshotEventTests(unittest.TestCase):
             self.assertTrue(sent[0]["event_time"].startswith("1970-01-01"))
 
     def test_violation_object_key_and_failure_fallback_preserve_crossing(self):
-        for upload_result in (KEY, None):
+        for original_result, annotated_result in ((KEY, "plate/marked.jpg"), (KEY, None), (None, KEY), (None, None)):
+            upload_result = (annotated_result or original_result) if original_result else None
             with TemporaryDirectory() as directory:
                 track, sent = vehicle_track(), []
                 client = Mock()
-                client.upload.return_value = upload_result
+                client.upload.side_effect = [original_result, annotated_result]
                 with SnapshotService("unused", SnapshotSettings(), client=client) as snapshots:
                     publisher = RedLightEventPublisher(replace(RedLightSettings(), snapshot_dir=directory),
                                                       lambda event, **_: sent.append(event) or True, snapshots=snapshots)
                     try:
-                        publisher.submit(CAMERA, Violation(track, 100., .8, np.zeros((10, 10, 3), np.uint8), 100.1))
+                        publisher.submit(CAMERA, Violation(track, 100., .8, np.zeros((10, 10, 3), np.uint8), 100.1, 1, LightObservation("RED", .8, {}, 100.1), ((0, 0), (1, 0), (1, 1), (0, 1))))
                         item = next(iter(publisher.pending.values()))
-                        item[3].result(timeout=3)
+                        files = item[3].result(timeout=3)
                         publisher.flush(item[2]+3)
+                        item[7].result(timeout=3).result(timeout=3)
+                        publisher.flush(item[2]+3)
+                        item[6].result(timeout=3)
                         publisher.flush(item[2]+4)
                         self.assertEqual(len(sent), 1)
                         self.assertEqual(sent[0]["snapshot_url"], upload_result)
                         self.assertEqual(sent[0]["payload"]["violation_type_code"], "RED_LIGHT")
                         self.assertEqual(sent[0]["payload"]["direction"], "OUT")
                         self.assertEqual(sent[0]["event_time"], sent[0]["payload"]["violation_evidence"]["crossing_timestamp"])
-                        self.assertEqual(client.upload.call_count, 1)
+                        self.assertEqual(client.upload.call_count, 2)
+                        if upload_result:
+                            evidence = sent[0]["payload"]["violation_evidence"]
+                            self.assertEqual(evidence["original_snapshot_url"], original_result)
+                            self.assertEqual(evidence["annotated_snapshot_url"], annotated_result)
+                            self.assertEqual(evidence["snapshot_view"], "ANNOTATED" if annotated_result else "ORIGINAL")
                     finally:
                         publisher.stop()
 

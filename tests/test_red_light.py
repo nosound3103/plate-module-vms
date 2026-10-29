@@ -41,7 +41,21 @@ def track(y=.4, identity=1):
 
 
 def read(t):
-    return VehicleRecognition(0, t.vehicle, PlateRecognition("30A-12345", .87, plate_color="WHITE"))
+    x1, y1, x2, y2 = t.vehicle.bbox
+    box = (x1+2, y2-12, x2-2, y2-2)
+    return VehicleRecognition(0, t.vehicle, PlateRecognition("30A-12345", .87, box, .9, "WHITE"))
+
+
+def remember_read(t):
+    t.remember(read(t), captured_at=100., sequence=1, identity_epoch=t.identity_epoch)
+
+
+def flush_ready(publisher, now):
+    publisher.flush(now)
+    for item in publisher.pending.values():
+        if item[6] is not None:
+            item[6].result(timeout=3)
+    publisher.flush(now)
 
 
 def signal(state, timestamp):
@@ -52,6 +66,11 @@ def light_frame(color="RED", shape=(200, 200)):
     frame = np.zeros((*shape, 3), np.uint8)
     cv2.circle(frame, (int(shape[1]*.08), int(shape[0]*.08)), max(2, int(min(shape)*.04)), COLORS[color], -1)
     return frame
+
+
+def witnessed_violation(*args, **kwargs):
+    v = Violation(*args, **kwargs)
+    return replace(v, signal=signal("RED", v.frame_timestamp), frame_sequence=1, light_points=LIGHT)
 
 
 class HsvTests(unittest.TestCase):
@@ -136,6 +155,81 @@ class HsvTests(unittest.TestCase):
                     self.assertFalse(original.any())
 
 
+class SignalHysteresisTests(unittest.TestCase):
+    def setUp(self):
+        self.tracker = TrafficLightStateTracker(RedLightSettings())
+
+    def update(self, state, timestamp):
+        strict = self.tracker.update(signal(state, timestamp))
+        return strict.state, self.tracker.display.state
+
+    def establish_red(self):
+        for timestamp in (1., 1.1, 1.2):
+            self.update("RED", timestamp)
+
+    def test_dropout_and_single_opposing_samples_do_not_flash_preview(self):
+        self.establish_red()
+        for state, timestamp in (("UNKNOWN", 1.3), ("RED", 1.4),
+                                 ("GREEN", 1.5), ("RED", 1.6)):
+            strict, display = self.update(state, timestamp)
+            self.assertEqual(strict, "UNKNOWN")
+            self.assertEqual(display, "RED")
+        self.assertEqual(self.update("RED", 1.7), ("RED", "RED"))
+
+    def test_new_phase_requires_consecutive_confirmation_without_intermediate_u(self):
+        self.establish_red()
+        self.assertEqual(self.update("GREEN", 1.3), ("UNKNOWN", "RED"))
+        self.assertEqual(self.update("GREEN", 1.4), ("GREEN", "RED"))
+        self.assertEqual(self.update("GREEN", 1.5), ("GREEN", "GREEN"))
+        self.assertEqual(self.tracker.display.timestamp, 1.5)
+
+    def test_yellow_also_requires_confirmation(self):
+        self.establish_red()
+        for timestamp in (1.3, 1.4, 1.5):
+            self.update("YELLOW", timestamp)
+        self.assertEqual(self.tracker.display.state, "YELLOW")
+
+    def test_unknown_expires_and_held_timestamp_is_not_refreshed(self):
+        self.establish_red()
+        for timestamp in (1.3, 1.5, 1.7):
+            self.assertEqual(self.update("UNKNOWN", timestamp), ("UNKNOWN", "RED"))
+            self.assertEqual(self.tracker.display.timestamp, 1.2)
+        self.assertEqual(self.update("UNKNOWN", 1.9), ("UNKNOWN", "UNKNOWN"))
+        self.assertEqual(self.update("RED", 2.), ("UNKNOWN", "UNKNOWN"))
+        self.update("RED", 2.1)
+        self.assertEqual(self.update("RED", 2.2), ("RED", "RED"))
+
+    def test_capture_gap_resets_preview_instead_of_retaining_stale_red(self):
+        self.establish_red()
+        self.assertEqual(self.update("RED", 2.), ("UNKNOWN", "UNKNOWN"))
+
+    def test_reordered_or_duplicate_frame_does_not_advance_confirmation(self):
+        self.establish_red()
+        saved = self.tracker.display
+        for timestamp in (1.2, 1.1):
+            self.assertEqual(self.update("GREEN", timestamp), ("UNKNOWN", "RED"))
+            self.assertIs(self.tracker.display, saved)
+        self.update("GREEN", 1.3)
+        self.assertEqual(self.update("GREEN", 1.4)[1], "RED")
+
+    def test_held_red_never_becomes_crossing_evidence(self):
+        for crossing_state in ("UNKNOWN", "GREEN", "YELLOW"):
+            with self.subTest(crossing_state=crossing_state):
+                tracker = TrafficLightStateTracker(RedLightSettings())
+                detector = RedLightViolationDetector(STOP, VIOLATION, RedLightSettings())
+                events = []
+                t = track()
+                for i, y in enumerate((.4, .44, .48, .52, .56)):
+                    timestamp = 1.+i*.1
+                    strict = tracker.update(signal("RED" if i < 3 else crossing_state, timestamp))
+                    t.box = (.4, y-.2, .6, y)
+                    events.extend(detector.update([t], strict, timestamp, light_frame()))
+                    if i == 3:
+                        self.assertEqual(tracker.display.state, "RED")
+                        self.assertEqual(strict.state, "UNKNOWN")
+                self.assertFalse(events)
+
+
 class TransitionTests(unittest.TestCase):
     def run_path(self, states, positions, *, identities=None, settings=None, violation=VIOLATION):
         detector = RedLightViolationDetector(STOP, violation, settings or RedLightSettings())
@@ -216,7 +310,8 @@ class ConfigurationTests(unittest.TestCase):
         for values in ({"signal_confirm_frames": 1}, {"dedup_guard_seconds": 1}, {"value_min": 300},
                        {"boundary_margin": float("nan")}, {"frame_buffer": 1.5},
                        {"component_close_size": 4}, {"component_close_size": 17},
-                       {"min_component_support": 1.1}):
+                       {"min_component_support": 1.1}, {"preview_confirm_frames": 1},
+                       {"preview_confirm_frames": 2.5}, {"preview_hold_seconds": 0}):
             with self.assertRaises(ValueError):
                 RedLightSettings(**values)
 
@@ -230,8 +325,8 @@ class DeliveryTests(unittest.TestCase):
         with patch("plate_ai.mqtt.create_client", return_value=(mqtt, client)):
             transport = MqttTransport(settings)
         t = track()
-        t.remember(read(t))
-        event = build_red_light_event(CAMERA, Violation(t, 100., .8, None), "/actual.png")
+        remember_read(t)
+        event = build_red_light_event(CAMERA, witnessed_violation(t, 100., .8, None), "/actual.png")
         self.assertFalse(transport.publish_plate_event(event, camera_code=CAMERA.code, object_key="red"))
         client.publish.assert_not_called()
         transport._connected.set()
@@ -250,8 +345,8 @@ class DeliveryTests(unittest.TestCase):
     def test_actual_plate_payload_snapshot_crossing_time_and_no_fake_metadata(self):
         with TemporaryDirectory() as directory:
             t = track()
-            t.remember(read(t))
-            v = Violation(t, 100., .75, light_frame(), 100.1)
+            remember_read(t)
+            v = witnessed_violation(t, 100., .75, light_frame(), 100.1)
             sent = []
             publisher = RedLightEventPublisher(replace(RedLightSettings(), snapshot_dir=directory),
                                               lambda e, **_: sent.append(e) or True)
@@ -259,7 +354,7 @@ class DeliveryTests(unittest.TestCase):
                 publisher.submit(CAMERA, v)
                 item = next(iter(publisher.pending.values()))
                 snapshot = item[3].result(timeout=3)
-                publisher.flush(item[2]+3)
+                flush_ready(publisher, item[2]+3)
                 self.assertEqual(len(sent), 1)
                 event = sent[0]
                 self.assertEqual(event["payload"]["violation_type_code"], "RED_LIGHT")
@@ -267,8 +362,8 @@ class DeliveryTests(unittest.TestCase):
                 self.assertEqual(event["camera_id"], CAMERA.id)
                 self.assertEqual(event["payload"]["violation_evidence"]["track_id"], t.id)
                 self.assertIsNone(event["snapshot_url"])  # Local paths cannot be resolved by VMS Storage.
-                self.assertTrue(Path(snapshot).is_file())
-                np.testing.assert_array_equal(cv2.imread(snapshot), v.frame)
+                self.assertTrue(Path(snapshot.original).is_file())
+                np.testing.assert_array_equal(cv2.imread(snapshot.original), v.frame)
                 self.assertNotIn("owner_name", event["payload"]["vehicle"])
                 self.assertNotIn("manufacturer", event["payload"]["vehicle"])
                 self.assertTrue(event["event_time"].endswith("+07:00"))
@@ -281,8 +376,8 @@ class DeliveryTests(unittest.TestCase):
         t.crossed_epoch, t.direction = 99, "IN"
         t.event, t.sent = build_plate_event(CAMERA, t), True
         frozen = json.dumps(t.event)
-        t.remember(read(t))
-        event = build_red_light_event(CAMERA, Violation(t, 100, .8, None), "/actual.png")
+        remember_read(t)
+        event = build_red_light_event(CAMERA, witnessed_violation(t, 100, .8, None), "/actual.png")
         self.assertEqual(event["payload"]["vehicle"]["license_plate"]["text"], "30A12345")
         self.assertEqual(json.dumps(t.event), frozen)
 
@@ -297,20 +392,20 @@ class DeliveryTests(unittest.TestCase):
                 return True
             publisher = RedLightEventPublisher(replace(RedLightSettings(), snapshot_dir=directory), publish)
             try:
-                publisher.submit(CAMERA, Violation(t, 100., .8, light_frame()))
+                publisher.submit(CAMERA, witnessed_violation(t, 100., .8, light_frame()))
                 item = next(iter(publisher.pending.values()))
                 item[3].result(timeout=3)
-                publisher.flush(item[2]+3)
+                flush_ready(publisher, item[2]+3)
                 self.assertFalse(sent)
-                t.remember(read(t))
+                remember_read(t)
                 with self.assertLogs("plate_ai.red_light_events", level="ERROR"):
-                    publisher.flush(item[2]+4)
+                    flush_ready(publisher, item[2]+4)
                 self.assertEqual(len(publisher.pending), 1)
                 online[0] = True
                 publisher.flush(item[2]+6)
                 publisher.flush(item[2]+7)
                 self.assertEqual(len(sent), 1)
-                publisher.submit(CAMERA, Violation(track(identity=2), 101., .8, light_frame()))
+                publisher.submit(CAMERA, witnessed_violation(track(identity=2), 101., .8, light_frame()))
                 item = next(iter(publisher.pending.values()))
                 with self.assertLogs("plate_ai.red_light_events", level="ERROR"):
                     publisher.flush(item[2]+31)
@@ -319,10 +414,10 @@ class DeliveryTests(unittest.TestCase):
 
     def test_same_plate_dedup_window_waits_for_puback_then_guard(self):
         t = track()
-        t.remember(read(t))
+        remember_read(t)
         t.crossed_epoch, t.direction = 100., "IN"
         recognition = build_plate_event(CAMERA, t)
-        violation = build_red_light_event(CAMERA, Violation(t, 100.1, .8, None), "/actual.png")
+        violation = build_red_light_event(CAMERA, witnessed_violation(t, 100.1, .8, None), "/actual.png")
         delivered, backend_last = [], {}
         clock = [10.]
         def backend(event, **kwargs):
@@ -349,7 +444,7 @@ class DeliveryTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
-    def make_runtime(self, enabled=True, directory="unused"):
+    def make_runtime(self, enabled=True, directory="unused", publish=None):
         zones = tuple(TrafficZone(name, name, points) for name, points in
                       (("TRAFFICLIGHT", LIGHT), ("STOP-ZONE", STOP), ("VIOLATION-ZONE", VIOLATION)))
         line = CrossingLine("count", ((.1, .5), (.9, .5)))
@@ -360,7 +455,8 @@ class PipelineTests(unittest.TestCase):
                                     frame_for=lambda m: frames.get(m.sequence),
                                     settings=SimpleNamespace(max_frame_age=1., shutdown_timeout_seconds=1.))
         recognition = SimpleNamespace(latest=lambda _: None)
-        runtime = PassageRuntime(sync, detection, recognition, PassageSettings(), publish=lambda *a, **k: True,
+        runtime = PassageRuntime(sync, detection, recognition, PassageSettings(),
+                                 publish=publish if publish is not None else lambda *a, **k: True,
                                  red_light_settings=replace(RedLightSettings(), enabled=enabled, snapshot_dir=directory))
         return runtime, config, frames, metadata
 
@@ -431,6 +527,54 @@ class PipelineTests(unittest.TestCase):
             self.assertIsNone(state.preview)
         finally:
             runtime.stop()
+
+    def test_runtime_overlay_holds_red_but_crossing_uses_current_strict_signal(self):
+        runtime, config, frames, metadata = self.make_runtime()
+        try:
+            for seq, y in enumerate((.4, .44, .48), 1):
+                self.step(runtime, config, frames, metadata, seq, y)
+            self.step(runtime, config, frames, metadata, 4, .52, "GREEN")
+            self.step(runtime, config, frames, metadata, 5, .56, "GREEN")
+            state = runtime._states[CAMERA.code]
+            self.assertEqual(state.light.state, "RED")
+            self.assertEqual(state.light_tracker.last.state, "GREEN")
+            self.assertFalse(runtime.red_events.pending)
+            self.step(runtime, config, frames, metadata, 6, .6, "GREEN")
+            self.assertEqual(state.light.state, "GREEN")
+            self.assertFalse(runtime.red_events.pending)
+        finally:
+            runtime.stop()
+
+    def test_actual_crossing_and_ocr_publish_one_combined_event_through_outbox(self):
+        from plate_ai.event_delivery import EventDelivery, EventDeliverySettings
+        with TemporaryDirectory() as directory:
+            sent = []
+            settings = EventDeliverySettings(state_path=str(Path(directory)/"events.sqlite3"),
+                                             recognition_hold_seconds=.5)
+            with EventDelivery(settings, lambda e, **_: sent.append(e) or True) as delivery:
+                runtime, config, frames, metadata = self.make_runtime(directory=directory, publish=delivery)
+                try:
+                    self.assertIs(runtime.publish, delivery)
+                    self.assertIs(runtime.red_events.publish, delivery)
+                    for seq, y in enumerate((.4, .44, .48, .52, .56, .6), 1):
+                        self.step(runtime, config, frames, metadata, seq, y)
+                    state = runtime._states[CAMERA.code]
+                    t = next(iter(state.tracker.tracks.values()))
+                    remember_read(t)
+                    started = time.monotonic()
+                    while runtime._pending or runtime.red_events.pending or not sent:
+                        elapsed = time.monotonic()-started
+                        self.assertLess(elapsed, 4.)
+                        runtime._flush(103.+elapsed)
+                        runtime.red_events.flush(103.+elapsed)
+                        time.sleep(.01)
+                    self.assertEqual(len(sent), 1)
+                    self.assertEqual(sent[0]["payload"]["violation_type_code"], "RED_LIGHT")
+                    self.assertEqual(sent[0]["payload"]["vehicle"]["license_plate"]["text"], "30A12345")
+                    self.assertTrue(sent[0]["event_time"].endswith("+07:00"))
+                    self.assertEqual((state.count_in, state.count_out), (1, 0))
+                finally:
+                    runtime.stop()
 
     def test_mqtt_overlay_traffic_colors_and_clear(self):
         for state in COLORS:

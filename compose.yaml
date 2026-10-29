@@ -26,6 +26,7 @@ x-inference: &inference
     PLATE_SNAPSHOT_ENABLED: "${PLATE_SNAPSHOT_ENABLED:-true}"
     PLATE_BBOX_ENABLED: "${PLATE_BBOX_ENABLED:-true}"
     RED_LIGHT_ENABLED: "${RED_LIGHT_ENABLED:-false}"
+    PLATE_EVENT_STATE_PATH: "${PLATE_EVENT_STATE_PATH:-/snapshots/event_delivery.sqlite3}"
     RED_LIGHT_SETTINGS: '${RED_LIGHT_SETTINGS:-{"snapshot_dir":"/snapshots/red_light"}}'
   volumes:
     - type: bind

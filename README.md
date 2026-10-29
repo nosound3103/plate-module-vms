@@ -804,6 +804,54 @@ Kiểm tra ảnh qua `https://MQTT_HOST/api/v1/snapshot/image?object_key=<object
 Test: `python -m unittest discover -s tests -p test_snapshots.py -v` trong Docker
 hoặc environment `dl-env` đã cấu hình ở trên.
 
+## Gửi event và chống trùng
+
+CLI dùng worker SQLite outbox, tách khỏi detection/bbox. Event chỉ rời hàng đợi
+controller khi đã ghi đĩa hoặc ghi nhận bị gộp/chặn trùng. MQTT mất kết nối thì
+worker retry; sau khi Paho nhận message, chỉ chờ PUBACK, không enqueue lặp.
+Event đã ghi outbox được khôi phục sau restart với nguyên `entity_id`, payload và
+`event_time` có `+07:00`. Phần track/OCR chưa tạo event vẫn chỉ nằm trong RAM.
+
+Cooldown mặc định 10 giây theo **camera UUID + biển chuẩn hóa + loại event + hướng**,
+tính bằng thời điểm xảy ra sự kiện; đổi track ID hoặc restart không xóa cooldown.
+Nhận diện và `RED_LIGHT` dùng khóa riêng. Biển rỗng chỉ chống trùng cùng entity,
+không gom mọi xe chưa có biển thành một xe. Không thể nhận biết chắc cùng xe
+sau khi mất ID nếu chưa có biển. Counting không đi qua bộ lọc event này.
+
+```dotenv
+PLATE_EVENT_COOLDOWN_SECONDS=10
+PLATE_EVENT_RECOGNITION_HOLD_SECONDS=3
+PLATE_EVENT_DELIVERY_TTL_SECONDS=120
+PLATE_EVENT_RETENTION_SECONDS=86400
+PLATE_EVENT_OUTBOX_MAX_PENDING=128
+PLATE_EVENT_STATE_MAX_RECORDS=10000
+```
+
+Docker lưu `event_delivery.sqlite3` trong bind `./snapshots:/snapshots`, độc lập
+với bật/tắt upload snapshot. Không xóa file DB/WAL/SHM để giữ cooldown và outbox.
+Native mặc định `snapshots/event_delivery.sqlite3`; override bằng
+`PLATE_EVENT_STATE_PATH`. Chỉ chạy một instance ghi cùng DB. TTL/queue/state đầy
+đều ghi log; `PERSISTED` là đã lưu local, `BROKER_ACK_NOT_BACKEND_CONFIRMATION`
+chỉ là broker nhận. Không có xác nhận backend tạo event/case trong contract hiện tại.
+
+Để tương thích dedup backend ±1 giây mà không sửa backend: nhận diện thường chờ
+thêm 3 giây sau khi vào outbox. Nếu cùng camera/biển có vi phạm trong ±1 giây
+theo `event_time`, trước khi nhận diện được giao cho MQTT, gộp thành **một PLATE
+event có biển số + violation**. Backend có thể tạo `plate_event` cùng
+`plate_violation_event/case` từ event đó; không gửi hai bản tin cạnh tranh.
+Vi phạm được ưu tiên và không chịu thời gian hold của nhận diện.
+
+Log `RECOGNITION_MERGED_INTO_VIOLATION` là gộp có chủ đích;
+`COOLDOWN_SUPPRESSED` là trùng passage. Nếu nhận diện đã giao MQTT rồi vi phạm
+mới đến, module không thể rút lại: log `BACKEND_EVENT_DEDUP_REQUIRED`, giữ nguyên
+timestamp thật và vẫn gửi vi phạm. Bảo đảm cả hai event riêng trong mọi trường hợp
+cần backend phân biệt loại event trong dedup và idempotency theo entity. QoS 1
+cũng có thể redeliver; không cam kết exactly-once qua crash/restart, nhất là biển rỗng.
+
+Test trong Docker: `python -m unittest discover -s tests -p test_event_delivery.py -v`.
+Test mô phỏng legacy dedup xác nhận một payload gộp giữ được vi phạm; vẫn cần
+kiểm tra Web VMS với camera thực để xác nhận backend tạo case thành công.
+
 ## Red Light Violation Detection
 
 Phát hiện xe đi từ `STOP-ZONE` sang `VIOLATION-ZONE` khi đèn đỏ, dùng chung
@@ -835,20 +883,50 @@ Các ngưỡng chỉnh qua JSON `RED_LIGHT_SETTINGS`; xem `RedLightSettings` tro
 `plate_ai/red_light_config.py`. Mặc định: S≥100, V≥150; Hue đỏ 0–7 và 170–179,
 vàng 8–35, xanh 36–90; diện tích màu tối thiểu 0.5% mask, closing kernel 5,
 support ≥35%. Hai quan sát cách nhau quá 0.5 giây sẽ mất xác nhận.
+Preview/MQTT bbox dùng hysteresis riêng: màu mới cần 3 frame liên tiếp
+(`preview_confirm_frames`); giữ màu đã xác nhận tối đa 0.6 giây kể từ quan sát
+cùng màu cuối (`preview_hold_seconds`) khi gặp nhiễu, rồi về `U`. Mất frame quá
+`signal_max_age` reset ngay. Nhãn vẫn là `R/G/Y/U`. Vi phạm dùng tín hiệu xác nhận
+thận trọng (`signal_confirm_frames`), không dùng màu được giữ trên preview;
+timestamp màu được giữ vẫn là thời điểm quan sát thật, không cập nhật giả.
 
 **Sự kiện:** gửi `RED_LIGHT` qua `smart_vms/ai_events/PLATE`, QoS 1, không retain.
 Trạng thái đèn và timestamp được giữ tại crossing; không kết luận khi mất track,
 đèn UNKNOWN hoặc crossing không đủ căn cứ. Chờ OCR mặc định 2 giây, tối đa 30
 giây; hết hạn chưa có biển thì ghi log và bỏ event. Snapshot upload theo luồng
 ở trên; bản PNG gốc giữ thêm trong `./snapshots:/snapshots` để đối chiếu local.
-Trên Linux, thư mục phải ghi được với UID 10001. Pending trong RAM mất khi restart.
+Mỗi candidate giữ cố định frame/bbox/vehicle/identity epoch tại crossing; không
+lấy bbox hoặc biển mới của track khác ở lúc publish. Bên cạnh PNG gốc có
+`*.annotated.jpg` chỉ rõ vehicle, track/frame và các vùng, cùng JSON liên kết ảnh,
+hash pixel, timestamp và nguồn OCR. Khi bật upload, `snapshot_url` trỏ tới bản
+đánh dấu với khung đỏ, track ID và biển số đã xác minh cạnh xe tại crossing.
+Ảnh gốc được upload riêng; object_key nằm ở
+`violation_evidence.original_snapshot_url`. Nếu upload ảnh gốc thất bại, không
+dùng bản đánh dấu làm bằng chứng duy nhất. Mỗi vi phạm upload tối đa hai ảnh;
+không áp dụng cho sự kiện nhận diện thường và không tự bật upload.
+Chỉ upload sau khi biển được kiểm chứng; retry MQTT không upload lại.
 
-Publisher chờ PUBACK + 1.25 giây trước event cùng camera/biển tiếp theo để giảm
-xung đột rate-limiter. Backend còn dedup database theo biển/camera và `event_time`
-±1 giây, nên giãn publish **không giải quyết được lớp này**. Cần tách dedup violation
-khỏi recognition, dùng khóa `(camera_id, entity_id, violation_type_code)` và kiểm thử
-hai event trong cùng 1 giây vẫn tạo đủ violation event/case. PUBACK chỉ xác nhận
-broker nhận, chưa xác nhận VMS tạo case. MVP chỉ xử lý đèn chính, chưa có ngoại lệ rẽ.
+Biển cho vi phạm phải có frame/identity nguồn, bbox biển nằm trong bbox xe,
+confidence OCR ≥0.8 và detection ≥0.65. OCR sau crossing chỉ nhận trong 2 giây;
+biển đã đọc trước đó vẫn dùng được nếu identity liên tục. Ghép track mơ hồ hoặc
+gap >0.5 giây làm mất tính liên tục của chứng cứ, không đổi logic counting.
+Không chạy lại OCR cho track đã có biển chỉ để vượt qua kiểm tra này. Candidate
+cần dịch chuyển qua ranh giới tối thiểu 0.03 theo tọa độ chuẩn hóa ngay lúc vào
+vùng; jitter sát vạch không được chờ đến đèn xanh rồi mới xác nhận thành vượt đỏ.
+Các ngưỡng trên chỉnh qua `RedLightSettings`; `PLATE_IDENTITY_COST_MARGIN` và
+`PLATE_IDENTITY_MAX_GAP_SECONDS` điều khiển kiểm tra liên kết ID.
+Khi thiếu sự kiện, xem log `CROSSING_REJECTED reason=...` và `TRANSITION_RESET`
+để phân biệt tín hiệu không đỏ, hình học/chuyển động chưa đủ và liên kết track bị
+gián đoạn. `PENDING_OCR_EVIDENCE` là chờ biển; `BROKER_ACK` chỉ xác nhận broker
+nhận MQTT, chưa xác nhận VMS tạo violation case. Upload ảnh tắt không chặn event.
+
+Muốn chỉ upload ảnh vi phạm, giữ `PLATE_SNAPSHOT_ENABLED=false` và đặt
+`"upload_snapshots":true` trong `RED_LIGHT_SETTINGS`. Mặc định tùy chọn này tắt;
+khi upload tắt event gửi `snapshot_url:null`, ảnh local không tự hiển thị trên VMS.
+Trên Linux, thư mục phải ghi được với UID 10001. Pending chờ OCR trong RAM mất
+khi restart; event đã ghi outbox được giữ lại. Publisher chờ PUBACK + 1.25 giây
+trước event cùng camera/biển tiếp theo và gộp nhận diện/vi phạm theo mục trên.
+MVP chỉ xử lý đèn chính, chưa có ngoại lệ rẽ.
 
 **Kiểm thử và chẩn đoán HSV:**
 

@@ -5,10 +5,14 @@ import re
 PLATE_TOPIC = "smart_vms/ai_events/PLATE"
 
 
+def normalize_plate(text):
+    return re.sub(r"[^A-Z0-9]", "", str(text or "").upper())
+
+
 def build_plate_event(camera, track):
     recognized = track.best_read()
     plate = recognized.license_plate if recognized is not None else None
-    text = re.sub(r"[^A-Z0-9]", "", plate.text.upper()) if plate else ""
+    text = normalize_plate(plate.text) if plate else ""
     confidence = plate.confidence if text else track.vehicle.confidence
     moment = datetime.fromtimestamp(track.crossed_epoch, timezone(timedelta(hours=7)))
     return {

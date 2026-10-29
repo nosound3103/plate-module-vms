@@ -8,6 +8,7 @@ import os
 @dataclass(frozen=True)
 class RedLightSettings:
     enabled: bool = False
+    upload_snapshots: bool = False
     saturation_min: int = 100
     value_min: int = 150
     red_hues: tuple = ((0, 7), (170, 179))
@@ -23,10 +24,16 @@ class RedLightSettings:
     ambiguity_ratio: float = .65
     signal_confirm_frames: int = 2
     signal_max_age: float = .5
+    preview_confirm_frames: int = 3
+    preview_hold_seconds: float = .6
     zone_confirm_frames: int = 2
     boundary_margin: float = .005
     max_zone_gap: float = .005
     max_crossing_seconds: float = .5
+    min_crossing_displacement: float = .03
+    plate_min_confidence: float = .8
+    plate_min_detection_confidence: float = .65
+    plate_after_crossing_seconds: float = 2.
     frame_buffer: int = 4
     ocr_wait_seconds: float = 2.
     pending_ttl: float = 30.
@@ -42,21 +49,22 @@ class RedLightSettings:
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if not math.isfinite(value) or value <= 0:
                     raise ValueError(f"RED_LIGHT {f.name} must be positive and finite")
-        for name in ("enabled", "debug"):
+        for name in ("enabled", "debug", "upload_snapshots"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"RED_LIGHT {name} must be boolean")
-        for name in ("signal_confirm_frames", "zone_confirm_frames", "frame_buffer", "max_pending",
+        for name in ("signal_confirm_frames", "preview_confirm_frames", "zone_confirm_frames", "frame_buffer", "max_pending",
                      "min_roi_pixels", "min_component_pixels", "saturation_min", "value_min", "component_close_size"):
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"RED_LIGHT {name} must be integer")
-        if self.signal_confirm_frames < 2 or self.zone_confirm_frames < 2:
+        if min(self.signal_confirm_frames, self.preview_confirm_frames, self.zone_confirm_frames) < 2:
             raise ValueError("RED_LIGHT confirmation requires at least two frames")
         if max(self.saturation_min, self.value_min) > 255:
             raise ValueError("HSV S/V must be <=255")
         if self.component_close_size % 2 != 1 or self.component_close_size > 15:
             raise ValueError("RED_LIGHT component_close_size must be odd and <=15 (1 disables closing)")
         for name in ("min_component_ratio", "min_component_fill", "min_component_support", "min_confidence", "ambiguity_ratio",
-                     "boundary_margin", "max_zone_gap"):
+                     "boundary_margin", "max_zone_gap", "min_crossing_displacement",
+                     "plate_min_confidence", "plate_min_detection_confidence"):
             if getattr(self, name) >= 1:
                 raise ValueError(f"RED_LIGHT {name} must be <1")
         for name in ("red_hues", "yellow_hues", "green_hues"):

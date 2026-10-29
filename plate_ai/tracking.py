@@ -89,8 +89,11 @@ class Track:
     plate_text: str = ""
     plate_confidence: float = 0.
     text_confidence: float = 0.
+    identity_epoch: int = 0
+    association_reliable: bool = True
+    read_evidence: dict = field(default_factory=dict)
 
-    def remember(self, read, received_monotonic=None):
+    def remember(self, read, received_monotonic=None, *, captured_at=None, sequence=None, identity_epoch=None):
         if received_monotonic is not None:
             plate = read.license_plate
             if self.plate_text and not plate.text:
@@ -109,6 +112,11 @@ class Track:
         # for this track must still be able to consume asynchronous OCR.
         if not read.license_plate.text:
             return
+        if (captured_at is not None and sequence is not None and identity_epoch == self.identity_epoch
+                and self.association_reliable):
+            self.read_evidence[read.license_plate.text] = ReadEvidence(read, captured_at, sequence, identity_epoch)
+            if len(self.read_evidence) > 16:
+                del self.read_evidence[next(iter(self.read_evidence))]
         text = read.license_plate.text
         count, total, previous = self.votes.get(text, (0, 0., None))
         best = read if previous is None or read.license_plate.confidence >= previous.license_plate.confidence else previous
@@ -126,6 +134,14 @@ class Track:
             return None
         count, score, read = max(self.votes.values(), key=lambda value: value[:2])
         return replace(read, license_plate=replace(read.license_plate, confidence=score/count))
+
+
+@dataclass(frozen=True)
+class ReadEvidence:
+    read: object
+    captured_at: float
+    sequence: int
+    identity_epoch: int
 
 
 class VehicleTracker:
@@ -161,6 +177,15 @@ class VehicleTracker:
             if col >= len(observations) or costs[row][col] >= 1.1:
                 continue
             track, observation, box = old[row], observations[col], boxes[col]
+            cost = costs[row][col]
+            ambiguous = (any(j != col and value <= cost+self.settings.identity_cost_margin
+                             for j, value in enumerate(costs[row][:len(observations)]))
+                         or any(i != row and costs[i][col] <= cost+self.settings.identity_cost_margin
+                                for i in range(len(old))))
+            reliable = not ambiguous and now-track.last_seen <= self.settings.identity_max_gap_seconds
+            if not reliable:
+                track.identity_epoch += 1
+            track.association_reliable = reliable
             previous, current = foot(track.box), foot(box)
             dt = max(.001, now-track.last_seen)
             track.velocity = tuple(max(-1., min(1., (current[i]-previous[i])/dt)) for i in range(2))

@@ -21,6 +21,7 @@ def main():
         bbox_settings = None
         red_light_settings = None
         snapshot_settings = None
+        delivery_settings = None
         tracking_enabled = False
         if args.mode == "detection":
             from .detection_config import DetectionSettings
@@ -29,13 +30,15 @@ def main():
             from .bbox_config import BboxSettings
             from .red_light_config import RedLightSettings
             from .snapshot_config import SnapshotSettings
+            from .event_delivery import EventDeliverySettings
             detection_settings = DetectionSettings.from_env()
             recognition_settings = RecognitionSettings.from_env()
             passage_settings = PassageSettings.from_env()
             bbox_settings = BboxSettings.from_env()
             red_light_settings = RedLightSettings.from_env()
             snapshot_settings = SnapshotSettings.from_env()
-            if snapshot_settings.enabled and (
+            delivery_settings = EventDeliverySettings.from_env()
+            if (snapshot_settings.enabled or red_light_settings.upload_snapshots) and (
                     (passage_settings.enabled and snapshot_settings.wait_seconds >= passage_settings.pending_ttl)
                     or (red_light_settings.enabled and snapshot_settings.wait_seconds >= red_light_settings.pending_ttl)):
                 raise ValueError("PLATE_SNAPSHOT_WAIT_SECONDS must be less than the event pending TTL")
@@ -76,13 +79,33 @@ def main():
                 if tracking_enabled:
                     from .passage_runtime import PassageRuntime
                     snapshots = None
-                    if snapshot_settings.enabled and (passage_settings.enabled or red_light_settings.enabled):
+                    red_snapshots = None
+                    if ((snapshot_settings.enabled and (passage_settings.enabled or red_light_settings.enabled))
+                            or (red_light_settings.enabled and red_light_settings.upload_snapshots)):
+                        from dataclasses import replace
                         from .snapshots import SnapshotService
-                        snapshots = stack.enter_context(SnapshotService(settings.broker_host, snapshot_settings))
+                        storage = stack.enter_context(SnapshotService(settings.broker_host,
+                                                                      replace(snapshot_settings, enabled=True)))
+                        snapshots = storage if snapshot_settings.enabled else None
+                        red_snapshots = storage if red_light_settings.enabled else None
+                    publish = None
+                    if passage_settings.enabled or red_light_settings.enabled:
+                        from .event_delivery import EventDelivery
+                        publish = stack.enter_context(EventDelivery(
+                            delivery_settings, sync.transport.publish_plate_event,
+                            sync.transport.publication_status,
+                            eligible=lambda identity, code: any(c.camera.id == identity and c.camera.code == code
+                                                                 for c in sync.snapshot().cameras),
+                            guard_seconds=red_light_settings.dedup_guard_seconds))
+                        if red_light_settings.enabled:
+                            logging.getLogger(__name__).warning(
+                                "RED_LIGHT requires backend event-kind dedup and entity_id idempotency; "
+                                "broker PUBACK does not confirm violation case creation")
                     passages = stack.enter_context(PassageRuntime(sync, detection, recognition, passage_settings,
                                                                  emit_events=passage_settings.enabled,
                                                                  red_light_settings=red_light_settings,
-                                                                 snapshots=snapshots))
+                                                                 snapshots=snapshots, red_light_snapshots=red_snapshots,
+                                                                 publish=publish))
                     if bbox_settings.enabled:
                         from .bbox_runtime import BboxRuntime
                         stack.enter_context(BboxRuntime(sync, passages, bbox_settings))

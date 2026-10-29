@@ -20,6 +20,7 @@ class _CameraState:
     last_frame_at: float = 0.
     lines_changed_at: float = 0.
     history: OrderedDict = field(default_factory=OrderedDict)
+    history_identities: dict = field(default_factory=dict)
     last_ocr_key: tuple | None = None
     ocr_revision: int = 0
     count_in: int = 0
@@ -39,7 +40,7 @@ class _CameraState:
 class PassageRuntime:
     """One metadata controller; inference and network acknowledgements run separately."""
     def __init__(self, sync_service, detection_runtime, recognition_runtime, settings, *, publish=None,
-                 emit_events=True, red_light_settings=None, snapshots=None):
+                 emit_events=True, red_light_settings=None, snapshots=None, red_light_snapshots=None):
         self.sync, self.detection, self.recognition = sync_service, detection_runtime, recognition_runtime
         self.settings = settings
         self.emit_events = emit_events
@@ -52,8 +53,10 @@ class PassageRuntime:
             from .red_light import TrafficLightStateDetector
             from .red_light_events import PlatePublishGate, RedLightEventPublisher
             status = getattr(getattr(sync_service, "transport", None), "publication_status", None) if publish is None else None
-            self.publish = PlatePublishGate(self.publish, red_light_settings.dedup_guard_seconds, status)
-            self.red_events = RedLightEventPublisher(red_light_settings, self.publish, snapshots=snapshots)
+            if not getattr(self.publish, "manages_delivery", False):
+                self.publish = PlatePublishGate(self.publish, red_light_settings.dedup_guard_seconds, status)
+            self.red_events = RedLightEventPublisher(red_light_settings, self.publish,
+                                                    snapshots=red_light_snapshots if red_light_snapshots is not None else snapshots)
             self.light_detector = TrafficLightStateDetector(red_light_settings)
         self._states, self._pending = {}, {}
         self._overlay_lock = threading.Lock()
@@ -128,6 +131,8 @@ class PassageRuntime:
         visible = state.tracker.update(metadata)
         key = (metadata.sequence, metadata.received_monotonic)
         state.history[key] = visible
+        state.history_identities[key] = {i: (t.object_key, t.identity_epoch, t.vehicle.bbox, t.association_reliable)
+                                         for i, t in visible.items()}
         state.latest_metadata, state.visible = metadata, visible
         state.last_frame_at = metadata.received_monotonic
         for track in visible.values():
@@ -191,7 +196,15 @@ class PassageRuntime:
                     if track is None or track.object_key != read.object_key:
                         continue
                 if track is not None:
-                    track.remember(read, result.received_monotonic)
+                    proof = state.history_identities.get(key, {}).get(read.detection_index)
+                    if proof and (proof[0] != track.object_key or proof[1] != track.identity_epoch
+                                  or tuple(proof[2]) != tuple(read.vehicle.bbox)):
+                        LOGGER.warning("PLATE OCR camera=%s sequence=%s result=REJECTED_IDENTITY_MISMATCH",
+                                       state.camera.code, result.sequence)
+                        continue
+                    track.remember(read, result.received_monotonic,
+                                   captured_at=result.captured_at if proof and proof[3] else None,
+                                   sequence=result.sequence, identity_epoch=proof[1] if proof else None)
             # Each drained result can contain one track from the same frame.
             state.last_ocr_key = key
             state.ocr_revision += 1
@@ -299,7 +312,8 @@ class PassageRuntime:
             key = next(iter(state.history))
             if len(state.history) <= self.settings.history_frames and now-key[1] <= self.settings.history_seconds:
                 break
-            state.history.popitem(last=False)
+            expired, _ = state.history.popitem(last=False)
+            state.history_identities.pop(expired, None)
         self._recognize(state)
         state.tracker.expire(now)
         self._publish_overlay(state)
@@ -348,7 +362,8 @@ class PassageRuntime:
         state.light_tracker = TrafficLightStateTracker(self.red_settings)
         if valid:
             state.red_detector = RedLightViolationDetector(by_name["STOP-ZONE"][0].points,
-                                                         by_name["VIOLATION-ZONE"][0].points, self.red_settings)
+                                                         by_name["VIOLATION-ZONE"][0].points, self.red_settings,
+                                                         light_points=state.light_points)
         LOGGER.log(logging.INFO if valid else logging.WARNING,
                    "RED_LIGHT camera=%s result=%s", state.camera.code,
                    "CONFIG_ENABLED" if valid else "DISABLED_MISSING_OR_INVALID_ZONES")
@@ -367,13 +382,15 @@ class PassageRuntime:
         frame = captured.image
         if state.light_points:
             raw = self.light_detector.detect(frame, state.light_points, metadata.captured_at)
-            state.light = state.light_tracker.update(raw)
+            crossing_signal = state.light_tracker.update(raw)
+            state.light = state.light_tracker.display
         else:
             state.light = LightObservation("UNKNOWN", 0., {}, metadata.captured_at)
+            crossing_signal = state.light
         if state.red_detector:
             if time.monotonic()-metadata.received_monotonic <= self.red_settings.signal_max_age:
-                events = state.red_detector.update(list(state.visible.values()), state.light,
-                                                   metadata.captured_at, frame)
+                events = state.red_detector.update(list(state.visible.values()), crossing_signal,
+                                                   metadata.captured_at, frame, frame_sequence=metadata.sequence)
                 for event in events:
                     self.red_events.submit(state.camera, event)
             else:

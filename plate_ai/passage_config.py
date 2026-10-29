@@ -16,9 +16,12 @@ class PassageSettings:
     retry_seconds: float = 1.
     history_seconds: float = 4.
     history_frames: int = 64
+    identity_cost_margin: float = .1
+    identity_max_gap_seconds: float = .5
 
     def __post_init__(self):
-        for name in ("track_ttl", "ocr_wait_seconds", "pending_ttl", "retry_seconds", "history_seconds"):
+        for name in ("track_ttl", "ocr_wait_seconds", "pending_ttl", "retry_seconds", "history_seconds",
+                     "identity_cost_margin", "identity_max_gap_seconds"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         if not 0 <= self.crossing_deadband < .5:
@@ -56,4 +59,6 @@ class PassageSettings:
             retry_seconds=number("PLATE_EVENT_RETRY_SECONDS", float, cls.retry_seconds),
             history_seconds=number("PLATE_TRACK_HISTORY_SECONDS", float, cls.history_seconds),
             history_frames=number("PLATE_TRACK_HISTORY_FRAMES", int, cls.history_frames),
+            identity_cost_margin=number("PLATE_IDENTITY_COST_MARGIN", float, cls.identity_cost_margin),
+            identity_max_gap_seconds=number("PLATE_IDENTITY_MAX_GAP_SECONDS", float, cls.identity_max_gap_seconds),
         )

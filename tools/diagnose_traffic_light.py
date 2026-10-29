@@ -6,13 +6,13 @@ import os
 import time
 import cv2
 import numpy as np
-from plate_ai.config import Settings
-from plate_ai.service import CameraSyncService
-from plate_ai.domain import TrafficZone
-from plate_ai.detection_config import DetectionSettings
-from plate_ai.rtsp import LatestFrameStream
-from plate_ai.red_light import TrafficLightStateDetector, contour
-from plate_ai.red_light_config import RedLightSettings
+from plate_ai.core.config import Settings
+from plate_ai.camera.sync import CameraSyncService
+from plate_ai.core.domain import TrafficZone
+from plate_ai.detection.config import DetectionSettings
+from plate_ai.camera.stream import LatestFrameStream
+from plate_ai.traffic_light.detector import TrafficLightStateDetector, contour
+from plate_ai.traffic_light.config import RedLightSettings
 
 
 def main():

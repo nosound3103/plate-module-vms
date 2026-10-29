@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field, replace
 import math
 from uuid import uuid4
-from .detection import VehicleDetection
+from plate_ai.detection.detector import VehicleDetection
 
 
 def iou(a, b):

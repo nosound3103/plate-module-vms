@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from plate_ai.event_delivery import EventDelivery, EventDeliverySettings
+from plate_ai.messaging.delivery import EventDelivery, EventDeliverySettings
 
 
 def event(key, occurred=100., *, plate="30A-12345", kind=None, camera="camera-uuid", direction="IN"):
@@ -119,7 +119,7 @@ class OutboxTests(unittest.TestCase):
         self.accept(event("red", 100.2, kind="RED_LIGHT"), 1004.1)
         self.assertEqual(self.state("normal"), "PENDING")  # Inflight cannot be retracted.
         self.delivery._deliver(self.db, 1004.2)
-        with self.assertLogs("plate_ai.event_delivery", level="ERROR") as logs:
+        with self.assertLogs("plate_ai.messaging.delivery", level="ERROR") as logs:
             self.delivery._deliver(self.db, 1005.6)
         self.assertIn("BACKEND_EVENT_DEDUP_REQUIRED", " ".join(logs.output))
         self.assertEqual(self.sent[-1]["event_time"], event("red", 100.2)["event_time"])

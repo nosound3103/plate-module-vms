@@ -5,7 +5,9 @@ USER root
 RUN --mount=type=cache,target=/tmp/cache/uv \
     uv pip install --python /app/.venv/bin/python \
         numpy==1.26.4 onnx==1.19.1 tensorrt-cu12==10.13.3.9 \
-    && uv pip check --python /app/.venv/bin/python
+    && uv pip check --python /app/.venv/bin/python \
+    && rm -rf /opt/plate/plate_ai
+COPY --chown=plate:plate plate_ai /opt/plate/plate_ai
 COPY --chown=plate:plate tools/vehicle_quantization.py /opt/plate/tools/vehicle_quantization.py
 USER plate
 ENTRYPOINT ["/app/.venv/bin/python", "/opt/plate/tools/vehicle_quantization.py"]

@@ -29,10 +29,10 @@ def array_for(image, size):
 
 
 def collect(args):
-    from plate_ai.config import Settings
-    from plate_ai.detection_config import DetectionSettings
-    from plate_ai.service import CameraSyncService
-    from plate_ai.rtsp import LatestFrameStream
+    from plate_ai.core.config import Settings
+    from plate_ai.detection.config import DetectionSettings
+    from plate_ai.camera.sync import CameraSyncService
+    from plate_ai.camera.stream import LatestFrameStream
     settings = replace(Settings.from_env(), client_id="tts_vehicle_calibration_01")
     root = Path(args.output)
     if (root/"manifest.json").exists() or any(root.glob("*/*.png")):
@@ -201,9 +201,9 @@ def statistics(values):
 
 def experiment(args):
     import torch
-    from plate_ai.detection_config import DetectionSettings
-    from plate_ai.detection import VehicleDetector
-    from plate_ai.tracking import iou
+    from plate_ai.detection.config import DetectionSettings
+    from plate_ai.detection.detector import VehicleDetector
+    from plate_ai.tracking.tracker import iou
     settings = replace(DetectionSettings.from_env(), device="cuda:0", image_size=args.size)
     torch.set_num_threads(settings.torch_threads)
     detector = VehicleDetector(settings)

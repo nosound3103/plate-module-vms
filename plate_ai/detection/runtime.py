@@ -5,9 +5,9 @@ import logging
 import os
 import threading
 import time
-from .detection import VehicleDetection, VehicleDetector
-from .domain import Camera
-from .rtsp import CapturedFrame, LatestFrameStream
+from plate_ai.detection.detector import VehicleDetection, VehicleDetector
+from plate_ai.core.domain import Camera
+from plate_ai.camera.stream import CapturedFrame, LatestFrameStream
 
 LOGGER = logging.getLogger(__name__)
 

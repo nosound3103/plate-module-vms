@@ -9,16 +9,16 @@ from unittest.mock import Mock
 import cv2
 import numpy as np
 
-from plate_ai.domain import Camera
-from plate_ai.detection import VehicleDetection
-from plate_ai.passage_config import PassageSettings
-from plate_ai.recognition import PlateRecognition, VehicleRecognition
-from plate_ai.red_light import LightObservation, RedLightViolationDetector, Violation
-from plate_ai.red_light_config import RedLightSettings
-from plate_ai.red_light_evidence import prepare_evidence, upload_original, upload_evidence, draw_vehicle_highlight
-from plate_ai.red_light_events import build_red_light_event, RedLightEventPublisher
-from plate_ai.runtime import DetectionMetadata
-from plate_ai.tracking import Track, VehicleTracker
+from plate_ai.core.domain import Camera
+from plate_ai.detection.detector import VehicleDetection
+from plate_ai.tracking.config import PassageSettings
+from plate_ai.recognition.pipeline import PlateRecognition, VehicleRecognition
+from plate_ai.traffic_light.detector import LightObservation, RedLightViolationDetector, Violation
+from plate_ai.traffic_light.config import RedLightSettings
+from plate_ai.traffic_light.evidence import prepare_evidence, upload_original, upload_evidence, draw_vehicle_highlight
+from plate_ai.traffic_light.events import build_red_light_event, RedLightEventPublisher
+from plate_ai.detection.runtime import DetectionMetadata
+from plate_ai.tracking.tracker import Track, VehicleTracker
 
 CAMERA = Camera("e240a093-fae9-4c25-a11e-1aeb037a0a9b", "CAM_TEST", "rtsp://unused")
 STOP = ((.1, .1), (.9, .1), (.9, .5), (.1, .5))
@@ -46,7 +46,7 @@ class EvidenceTests(unittest.TestCase):
     def test_rejected_crossing_reports_signal_reason(self):
         detector = RedLightViolationDetector(STOP, ZONE, RedLightSettings())
         t = track()
-        with self.assertLogs("plate_ai.red_light", level="INFO") as captured:
+        with self.assertLogs("plate_ai.traffic_light.detector", level="INFO") as captured:
             for i, y in enumerate((.4, .44, .48, .54, .57)):
                 t.box = (.4, y-.2, .6, y)
                 now = 100.+i*.1

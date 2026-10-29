@@ -9,7 +9,7 @@ import re
 @dataclass(frozen=True)
 class DetectionSettings:
     device: str = "cpu"
-    weights_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1]/"models"/"weights")
+    weights_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2]/"models"/"weights")
     vehicle_weight: str = "last_vehicle_s_07042023_640_hp.pt"
     vehicle_sha256: str = "1dd3770b89f3517c81e1d1101dd7815b0c0fc4b16741b1769a655168c95673c7"
     image_size: int = 640
@@ -65,7 +65,7 @@ class DetectionSettings:
 
         return cls(
             device=read("PLATE_DEVICE", cls.device),
-            weights_dir=Path(read("PLATE_WEIGHTS_DIR", Path(__file__).resolve().parents[1]/"models"/"weights")),
+            weights_dir=Path(read("PLATE_WEIGHTS_DIR", Path(__file__).resolve().parents[2]/"models"/"weights")),
             vehicle_weight=read("PLATE_VEHICLE_WEIGHT", cls.vehicle_weight),
             vehicle_sha256=read("PLATE_VEHICLE_SHA256", cls.vehicle_sha256),
             image_size=number("PLATE_IMAGE_SIZE", int, cls.image_size),

@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from plate_ai.detection_config import DetectionSettings
-from plate_ai.domain import Camera
-from plate_ai.rtsp import CapturedFrame, LatestFrameStream
-from plate_ai.runtime import DetectionRuntime, DetectionResult
+from plate_ai.detection.config import DetectionSettings
+from plate_ai.core.domain import Camera
+from plate_ai.camera.stream import CapturedFrame, LatestFrameStream
+from plate_ai.detection.runtime import DetectionRuntime, DetectionResult
 
 
 def camera(source="rtsp://unused/first", code="CAM_01"):

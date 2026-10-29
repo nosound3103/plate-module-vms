@@ -142,7 +142,7 @@ class EventDelivery:
         return db
 
     def _accept(self, db, key, code, body, now):
-        from .events import normalize_plate
+        from plate_ai.messaging.events import normalize_plate
         event = json.loads(body)
         payload = event["payload"]
         moment = datetime.fromisoformat(event["event_time"])

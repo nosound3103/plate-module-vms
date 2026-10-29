@@ -67,7 +67,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip uninstall --python /app/.venv/bin/python ultralytics ultralytics-opencv-headless opencv-python opencv-python-headless \
     && uv pip install --python /app/.venv/bin/python --no-deps --require-hashes -r requirements-inference.lock -r requirements-cuda-compat.lock \
     && uv pip check --python /app/.venv/bin/python \
-    && useradd --uid 10001 --create-home plate
+    && useradd --uid 10001 --create-home plate \
+    && rm -rf /opt/plate/plate_ai
 COPY --chown=plate:plate plate_ai ./plate_ai
 USER plate
 HEALTHCHECK NONE

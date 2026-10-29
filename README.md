@@ -18,6 +18,31 @@ Một file `compose.yaml` cung cấp ba profile: `gpu`, `cpu`, `sync`. Profile G
 chạy detection; các cờ môi trường bật OCR, event IN/OUT và bbox realtime.
 Profile sync chỉ đồng bộ cấu hình camera/vạch.
 
+## Cấu trúc source
+
+```text
+plate_ai/
+  __main__.py       # CLI và lifecycle service
+  core/             # Cấu hình chung, camera/zone data types
+  camera/           # Đồng bộ camera/zone, đọc RTSP
+  detection/        # Vehicle detector, TensorRT, inference worker
+  recognition/      # Plate OCR và thuộc tính xe
+  tracking/         # Tracking, counting, điều phối passage
+  overlay/          # Bbox schema, MQTT client và worker realtime
+  messaging/        # MQTT cấu hình/event, PLATE payload, durable outbox
+  evidence/         # Storage API, process xử lý ảnh, renderer IN/OUT
+  traffic_light/    # HSV, state/violation detector, evidence/publisher
+  models/           # Tương thích checkpoint model hiện có
+tests/              # Unit/integration tests local
+tools/              # Benchmark và chẩn đoán
+```
+
+Chạy CLI như cũ: `python -m plate_ai`. API package vẫn export `Settings`,
+`CameraSyncService`, `CameraConfiguration`, `DetectionSettings`. Khi import
+module nội bộ, dùng đường dẫn theo nhóm, ví dụ
+`from plate_ai.tracking.runtime import PassageRuntime`. Các ngưỡng, biến môi
+trường, MQTT topic/payload và thuật toán không thay đổi theo cách chia thư mục.
+
 ## Yêu cầu
 
 - Docker Engine hoặc Docker Desktop với Compose hỗ trợ `env_file.required`.
@@ -211,7 +236,7 @@ mới nhất giúp giảm backlog nhưng không đảm bảo đồng bộ từng
 
 ```python
 from plate_ai import CameraSyncService, DetectionSettings, Settings
-from plate_ai.runtime import DetectionRuntime
+from plate_ai.detection.runtime import DetectionRuntime
 
 with CameraSyncService(Settings.from_env()) as sync:
     with DetectionRuntime(sync, DetectionSettings.from_env()) as runtime:
@@ -331,8 +356,8 @@ RTSP source, ảnh hoặc text biển số.
 ### Kết quả tích hợp
 
 ```python
-from plate_ai.recognition_config import RecognitionSettings
-from plate_ai.recognition_runtime import RecognitionRuntime
+from plate_ai.recognition.config import RecognitionSettings
+from plate_ai.recognition.runtime import RecognitionRuntime
 
 # sync, detection và passages (tracker) đã khởi động trong ứng dụng.
 with RecognitionRuntime(sync, detection, RecognitionSettings(), track_source=passages) as recognition:
@@ -899,7 +924,7 @@ hình học sẽ tắt rule; cập nhật zone reset trạng thái và hủy pen
 Riêng ba zone này, geometry sai không giữ lại vùng hợp lệ cũ.
 
 Các ngưỡng chỉnh qua JSON `RED_LIGHT_SETTINGS`; xem `RedLightSettings` trong
-`plate_ai/red_light_config.py`. Mặc định: S≥100, V≥150; Hue đỏ 0–7 và 170–179,
+`plate_ai/traffic_light/config.py`. Mặc định: S≥100, V≥150; Hue đỏ 0–7 và 170–179,
 vàng 8–35, xanh 36–90; diện tích màu tối thiểu 0.5% mask, closing kernel 5,
 support ≥35%. Hai quan sát cách nhau quá 0.5 giây sẽ mất xác nhận.
 Preview/MQTT bbox dùng hysteresis riêng: màu mới cần 3 frame liên tiếp

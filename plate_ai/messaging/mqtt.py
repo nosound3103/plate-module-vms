@@ -113,7 +113,7 @@ class MqttTransport:
 
     def publish_plate_event(self, event, *, camera_code, object_key):
         """Return queue acceptance; PUBACK is logged asynchronously, never awaited."""
-        from .events import PLATE_TOPIC
+        from plate_ai.messaging.events import PLATE_TOPIC
         try:
             body = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         except (ValueError, TypeError):

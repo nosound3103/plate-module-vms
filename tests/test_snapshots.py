@@ -14,19 +14,19 @@ from urllib.error import HTTPError, URLError
 import cv2
 import numpy as np
 
-from plate_ai.domain import Camera, CrossingLine
-from plate_ai.detection import VehicleDetection
-from plate_ai.passage_config import PassageSettings
-from plate_ai.passage_runtime import PassageRuntime, _CameraState
-from plate_ai.recognition import PlateRecognition, VehicleRecognition
-from plate_ai.red_light import Violation, LightObservation
-from plate_ai.red_light_config import RedLightSettings
-from plate_ai.red_light_events import RedLightEventPublisher
-from plate_ai.rtsp import CapturedFrame
-from plate_ai.runtime import DetectionMetadata
-from plate_ai.snapshot_config import SnapshotSettings
-from plate_ai.snapshots import SnapshotService, StorageClient
-from plate_ai.tracking import Track, VehicleTracker
+from plate_ai.core.domain import Camera, CrossingLine
+from plate_ai.detection.detector import VehicleDetection
+from plate_ai.tracking.config import PassageSettings
+from plate_ai.tracking.runtime import PassageRuntime, _CameraState
+from plate_ai.recognition.pipeline import PlateRecognition, VehicleRecognition
+from plate_ai.traffic_light.detector import Violation, LightObservation
+from plate_ai.traffic_light.config import RedLightSettings
+from plate_ai.traffic_light.events import RedLightEventPublisher
+from plate_ai.camera.stream import CapturedFrame
+from plate_ai.detection.runtime import DetectionMetadata
+from plate_ai.evidence.config import SnapshotSettings
+from plate_ai.evidence.storage import SnapshotService, StorageClient
+from plate_ai.tracking.tracker import Track, VehicleTracker
 
 CAMERA = Camera("e240a093-fae9-4c25-a11e-1aeb037a0a9b", "CAM_TEST", "rtsp://unused")
 KEY = f"plate/2026-10-28/camera_{CAMERA.id}/actual-storage-id.jpg"
@@ -70,7 +70,7 @@ class StorageTests(unittest.TestCase):
     def test_timeout_and_500_retry_then_return_key(self):
         for failure in (TimeoutError(), URLError("offline"), HTTPError("unused", 500, "failure", {}, BytesIO())):
             opener = Mock(side_effect=[failure, response({"success": True, "object_key": KEY})])
-            with patch("plate_ai.snapshots.time.sleep"):
+            with patch("plate_ai.evidence.storage.time.sleep"):
                 self.assertEqual(StorageClient("vms.example", SnapshotSettings(), opener=opener)
                                  .upload(CAMERA, b"jpeg", object_key="event"), KEY)
             self.assertEqual(opener.call_count, 2)

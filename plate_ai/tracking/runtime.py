@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 import logging
 import threading
 import time
-from .domain import Camera, CrossingLine, TrafficZone
-from .events import build_plate_event
-from .tracking import VehicleTracker, foot, intersects
-from .bbox import OverlayDetection, OverlaySnapshot
+from plate_ai.core.domain import Camera, CrossingLine, TrafficZone
+from plate_ai.messaging.events import build_plate_event
+from plate_ai.tracking.tracker import VehicleTracker, foot, intersects
+from plate_ai.overlay.schema import OverlayDetection, OverlaySnapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,8 +50,8 @@ class PassageRuntime:
         self.red_settings = red_light_settings
         self.red_events = None
         if red_light_settings is not None and red_light_settings.enabled:
-            from .red_light import TrafficLightStateDetector
-            from .red_light_events import PlatePublishGate, RedLightEventPublisher
+            from plate_ai.traffic_light.detector import TrafficLightStateDetector
+            from plate_ai.traffic_light.events import PlatePublishGate, RedLightEventPublisher
             status = getattr(getattr(sync_service, "transport", None), "publication_status", None) if publish is None else None
             if not getattr(self.publish, "manages_delivery", False):
                 self.publish = PlatePublishGate(self.publish, red_light_settings.dedup_guard_seconds, status)
@@ -117,7 +117,7 @@ class PassageRuntime:
     def latest_preview(self, camera_code):
         """Native preview frame with vehicle/count/traffic annotations; original stays untouched."""
         import cv2
-        from .red_light import draw_traffic_light
+        from plate_ai.traffic_light.detector import draw_traffic_light
         snapshot = self.latest_overlay(camera_code)
         with self._overlay_lock:
             state = self._states.get(camera_code)
@@ -171,7 +171,7 @@ class PassageRuntime:
                     if self.emit_events and len(self._pending) < self.settings.max_pending:
                         self._pending[track.object_key] = (state.camera, track)
                         if self.snapshots:
-                            from .passage_evidence import PassageAnnotation
+                            from plate_ai.evidence.passage import PassageAnnotation
                             captured = self.detection.frame_for(metadata)
                             self._snapshot_futures[track.object_key] = self.snapshots.submit(
                                 state.camera, captured.image if captured else None, object_key=track.object_key,
@@ -359,7 +359,7 @@ class PassageRuntime:
                 event.set()
 
     def _configure_red(self, state, zones, now):
-        from .red_light import RedLightViolationDetector, TrafficLightStateTracker
+        from plate_ai.traffic_light.detector import RedLightViolationDetector, TrafficLightStateTracker
         named = tuple(z for z in zones if isinstance(z, TrafficZone))
         if named == state.red_zones:
             return
@@ -386,7 +386,7 @@ class PassageRuntime:
                    "CONFIG_ENABLED" if valid else "DISABLED_MISSING_OR_INVALID_ZONES")
 
     def _observe_red(self, state, metadata):
-        from .red_light import LightObservation
+        from plate_ai.traffic_light.detector import LightObservation
         if metadata.received_monotonic < state.red_changed_at:
             return
         captured = self.detection.frame_for(metadata)

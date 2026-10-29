@@ -10,24 +10,24 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from plate_ai.bbox import OverlaySnapshot, build_bbox_message
-from plate_ai.bbox_config import BboxSettings
-from plate_ai.detection import VehicleDetection
-from plate_ai.domain import Camera, CrossingLine, TrafficZone, ZoneStore
-from plate_ai.events import build_plate_event
-from plate_ai.mqtt import MqttTransport
-from plate_ai.passage_config import PassageSettings
-from plate_ai.passage_runtime import PassageRuntime
-from plate_ai.recognition import PlateRecognition, VehicleRecognition
-from plate_ai.red_light import (COLORS, LABELS, LightObservation, RedLightViolationDetector,
+from plate_ai.overlay.schema import OverlaySnapshot, build_bbox_message
+from plate_ai.overlay.config import BboxSettings
+from plate_ai.detection.detector import VehicleDetection
+from plate_ai.core.domain import Camera, CrossingLine, TrafficZone, ZoneStore
+from plate_ai.messaging.events import build_plate_event
+from plate_ai.messaging.mqtt import MqttTransport
+from plate_ai.tracking.config import PassageSettings
+from plate_ai.tracking.runtime import PassageRuntime
+from plate_ai.recognition.pipeline import PlateRecognition, VehicleRecognition
+from plate_ai.traffic_light.detector import (COLORS, LABELS, LightObservation, RedLightViolationDetector,
                                 TrafficLightStateDetector, TrafficLightStateTracker,
                                 Violation, draw_traffic_light)
-from plate_ai.red_light_config import RedLightSettings
-from plate_ai.red_light_events import PlatePublishGate, RedLightEventPublisher, build_red_light_event
-from plate_ai.rtsp import CapturedFrame
-from plate_ai.runtime import DetectionMetadata, DetectionRuntime
-from plate_ai.service import CameraConfiguration
-from plate_ai.tracking import Track
+from plate_ai.traffic_light.config import RedLightSettings
+from plate_ai.traffic_light.events import PlatePublishGate, RedLightEventPublisher, build_red_light_event
+from plate_ai.camera.stream import CapturedFrame
+from plate_ai.detection.runtime import DetectionMetadata, DetectionRuntime
+from plate_ai.camera.sync import CameraConfiguration
+from plate_ai.tracking.tracker import Track
 
 STOP = ((.1, .1), (.9, .1), (.9, .5), (.1, .5))
 VIOLATION = ((.1, .5), (.9, .5), (.9, .9), (.1, .9))
@@ -146,7 +146,7 @@ class HsvTests(unittest.TestCase):
         for shape in ((200, 400), (400, 200)):
             original = np.zeros((*shape, 3), np.uint8)
             for state, color in COLORS.items():
-                with patch("plate_ai.red_light.cv2.putText", wraps=cv2.putText) as text:
+                with patch("plate_ai.traffic_light.detector.cv2.putText", wraps=cv2.putText) as text:
                     preview = draw_traffic_light(original.copy(), LIGHT, signal(state, 1))
                     self.assertEqual(text.call_args.args[1], LABELS[state])
                     self.assertEqual(text.call_args.args[5], color)
@@ -322,7 +322,7 @@ class DeliveryTests(unittest.TestCase):
         client = Mock()
         mqtt = SimpleNamespace(MQTT_ERR_SUCCESS=0, MQTT_ERR_NO_CONN=4)
         settings = SimpleNamespace(client_id="test")
-        with patch("plate_ai.mqtt.create_client", return_value=(mqtt, client)):
+        with patch("plate_ai.messaging.mqtt.create_client", return_value=(mqtt, client)):
             transport = MqttTransport(settings)
         t = track()
         remember_read(t)
@@ -336,7 +336,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(client.publish.call_args.args[0], "smart_vms/ai_events/PLATE")
         self.assertEqual(client.publish.call_args.kwargs, {"qos": 1, "retain": False})
         self.assertEqual(transport.publication_status("red")[0], "PENDING")
-        with patch("plate_ai.mqtt.time.monotonic", return_value=22.):
+        with patch("plate_ai.messaging.mqtt.time.monotonic", return_value=22.):
             transport._on_publish(None, None, 7, SimpleNamespace(is_failure=False), None)
         self.assertEqual(transport.publication_status("red"), ("ACK", 22.))
         client.publish.side_effect = RuntimeError("socket unavailable")
@@ -398,7 +398,7 @@ class DeliveryTests(unittest.TestCase):
                 flush_ready(publisher, item[2]+3)
                 self.assertFalse(sent)
                 remember_read(t)
-                with self.assertLogs("plate_ai.red_light_events", level="ERROR"):
+                with self.assertLogs("plate_ai.traffic_light.events", level="ERROR"):
                     flush_ready(publisher, item[2]+4)
                 self.assertEqual(len(publisher.pending), 1)
                 online[0] = True
@@ -407,7 +407,7 @@ class DeliveryTests(unittest.TestCase):
                 self.assertEqual(len(sent), 1)
                 publisher.submit(CAMERA, witnessed_violation(track(identity=2), 101., .8, light_frame()))
                 item = next(iter(publisher.pending.values()))
-                with self.assertLogs("plate_ai.red_light_events", level="ERROR"):
+                with self.assertLogs("plate_ai.traffic_light.events", level="ERROR"):
                     publisher.flush(item[2]+31)
             finally:
                 publisher.stop()
@@ -428,7 +428,7 @@ class DeliveryTests(unittest.TestCase):
             return True
         receipt = [("PENDING", 10.)]
         gate = PlatePublishGate(backend, 1.25, lambda _: receipt[0])
-        with patch("plate_ai.red_light_events.time.monotonic", side_effect=lambda: clock[0]):
+        with patch("plate_ai.traffic_light.events.time.monotonic", side_effect=lambda: clock[0]):
             self.assertTrue(gate(recognition, camera_code=CAMERA.code, object_key="normal"))
             clock[0] = 10.1
             self.assertFalse(gate(violation, camera_code=CAMERA.code, object_key="red"))
@@ -467,7 +467,7 @@ class PipelineTests(unittest.TestCase):
         m = DetectionMetadata(CAMERA, seq, 1000+seq*.1, now, 200, 200, (vehicle,))
         frames[seq] = CapturedFrame(seq, m.captured_at, now, frame)
         metadata[:] = [m]
-        with patch("plate_ai.passage_runtime.time.monotonic", return_value=now):
+        with patch("plate_ai.tracking.runtime.time.monotonic", return_value=now):
             runtime._process_camera(CAMERA.code, config)
         return frame
 
@@ -486,7 +486,7 @@ class PipelineTests(unittest.TestCase):
                         pending = next(iter(runtime.red_events.pending.values()))
                         pending[3].result(timeout=3)
                         self.assertIs(pending[1].track, next(iter(state.tracker.tracks.values())))
-                        with patch("plate_ai.passage_runtime.time.monotonic", return_value=100.6):
+                        with patch("plate_ai.tracking.runtime.time.monotonic", return_value=100.6):
                             preview = runtime.latest_preview(CAMERA.code)
                         self.assertIsNotNone(preview)
                         self.assertFalse(np.array_equal(preview, original))
@@ -504,13 +504,13 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(state.red_detector.states)
             new_stop = replace(config.zones[1], points=())
             changed = replace(config, zones=(config.zones[0], new_stop, *config.zones[2:]))
-            with self.assertLogs("plate_ai.passage_runtime", level="WARNING"):
+            with self.assertLogs("plate_ai.tracking.runtime", level="WARNING"):
                 self.step(runtime, changed, frames, metadata, 4, .52)
             self.assertIsNone(state.red_detector)
             self.step(runtime, changed, frames, metadata, 5, .56)
             self.assertFalse(runtime.red_events.pending)
             other = replace(CAMERA, code="CAM_OTHER", id="another-actual-camera")
-            with patch("plate_ai.passage_runtime.time.monotonic", return_value=101.):
+            with patch("plate_ai.tracking.runtime.time.monotonic", return_value=101.):
                 runtime._process_camera(other.code, replace(config, camera=other))
             self.assertIsNot(runtime._states[other.code].light_tracker, state.light_tracker)
         finally:
@@ -546,7 +546,7 @@ class PipelineTests(unittest.TestCase):
             runtime.stop()
 
     def test_actual_crossing_and_ocr_publish_one_combined_event_through_outbox(self):
-        from plate_ai.event_delivery import EventDelivery, EventDeliverySettings
+        from plate_ai.messaging.delivery import EventDelivery, EventDeliverySettings
         with TemporaryDirectory() as directory:
             sent = []
             settings = EventDeliverySettings(state_path=str(Path(directory)/"events.sqlite3"),

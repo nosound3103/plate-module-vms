@@ -1,7 +1,7 @@
 """Immutable tracked geometry and normalized VMS overlay serialization."""
 from dataclasses import dataclass
 import time
-from .domain import Camera
+from plate_ai.core.domain import Camera
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ def build_bbox_message(snapshot, organization_id, settings, *, clear=False):
     detections = []
     if not clear:
         if snapshot.traffic_light_points and snapshot.traffic_light is not None:
-            from .red_light import COLORS, LABELS
+            from plate_ai.traffic_light.detector import COLORS, LABELS
             sample = snapshot.traffic_light
             xs, ys = zip(*snapshot.traffic_light_points)
             b, g, r = COLORS[sample.state]

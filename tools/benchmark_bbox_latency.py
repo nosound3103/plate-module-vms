@@ -8,17 +8,17 @@ from pathlib import Path
 import statistics
 import time
 
-from plate_ai.bbox_config import BboxSettings
-from plate_ai.bbox_runtime import BboxRuntime
-from plate_ai.config import Settings
-from plate_ai.detection_config import DetectionSettings
-from plate_ai.passage_config import PassageSettings
-from plate_ai.passage_runtime import PassageRuntime
-from plate_ai.recognition_config import RecognitionSettings
-from plate_ai.recognition_runtime import RecognitionRuntime
-from plate_ai.red_light_config import RedLightSettings
-from plate_ai.runtime import DetectionRuntime
-from plate_ai.service import CameraSyncService
+from plate_ai.overlay.config import BboxSettings
+from plate_ai.overlay.runtime import BboxRuntime
+from plate_ai.core.config import Settings
+from plate_ai.detection.config import DetectionSettings
+from plate_ai.tracking.config import PassageSettings
+from plate_ai.tracking.runtime import PassageRuntime
+from plate_ai.recognition.config import RecognitionSettings
+from plate_ai.recognition.runtime import RecognitionRuntime
+from plate_ai.traffic_light.config import RedLightSettings
+from plate_ai.detection.runtime import DetectionRuntime
+from plate_ai.camera.sync import CameraSyncService
 
 
 def stats(values):

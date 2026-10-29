@@ -9,19 +9,19 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from plate_ai.bbox import OverlaySnapshot, build_bbox_message
-from plate_ai.bbox_config import BboxSettings
-from plate_ai.bbox_runtime import BboxRuntime
-from plate_ai.detection import VehicleDetection
-from plate_ai.domain import Camera
-from plate_ai.service import CameraConfiguration
-from plate_ai.passage_config import PassageSettings
-from plate_ai.passage_runtime import PassageRuntime
-from plate_ai.recognition import PlateRecognition, RecognitionPipeline, VehicleRecognition
-from plate_ai.recognition_config import RecognitionSettings
-from plate_ai.recognition_runtime import RecognitionRuntime
-from plate_ai.rtsp import CapturedFrame
-from plate_ai.runtime import DetectionMetadata, DetectionResult
+from plate_ai.overlay.schema import OverlaySnapshot, build_bbox_message
+from plate_ai.overlay.config import BboxSettings
+from plate_ai.overlay.runtime import BboxRuntime
+from plate_ai.detection.detector import VehicleDetection
+from plate_ai.core.domain import Camera
+from plate_ai.camera.sync import CameraConfiguration
+from plate_ai.tracking.config import PassageSettings
+from plate_ai.tracking.runtime import PassageRuntime
+from plate_ai.recognition.pipeline import PlateRecognition, RecognitionPipeline, VehicleRecognition
+from plate_ai.recognition.config import RecognitionSettings
+from plate_ai.recognition.runtime import RecognitionRuntime
+from plate_ai.camera.stream import CapturedFrame
+from plate_ai.detection.runtime import DetectionMetadata, DetectionResult
 
 
 CAMERA = Camera("camera-test-uuid", "CAM_TEST", "rtsp://unused")
@@ -83,12 +83,12 @@ class Detection:
 
 class PriorityTests(unittest.TestCase):
     def test_bbox_advances_while_red_light_snapshot_upload_is_blocked(self):
-        from plate_ai.snapshots import SnapshotService
-        from plate_ai.snapshot_config import SnapshotSettings
-        from plate_ai.red_light import Violation, LightObservation
-        from plate_ai.red_light_config import RedLightSettings
-        from plate_ai.red_light_events import RedLightEventPublisher
-        from plate_ai.tracking import Track
+        from plate_ai.evidence.storage import SnapshotService
+        from plate_ai.evidence.config import SnapshotSettings
+        from plate_ai.traffic_light.detector import Violation, LightObservation
+        from plate_ai.traffic_light.config import RedLightSettings
+        from plate_ai.traffic_light.events import RedLightEventPublisher
+        from plate_ai.tracking.tracker import Track
         entered, release = threading.Event(), threading.Event()
         sent, events = [], []
         def upload(camera, image, *, object_key):
@@ -183,14 +183,14 @@ class PriorityTests(unittest.TestCase):
         geometry = OverlaySnapshot(CAMERA, 1, 100., 10., (), 0, 0)
         enriched = replace(geometry, count_in=1)
         next_frame = replace(geometry, sequence=2, received_monotonic=10.05)
-        with patch("plate_ai.bbox_runtime.time.monotonic", return_value=10.):
+        with patch("plate_ai.overlay.runtime.time.monotonic", return_value=10.):
             self.assertTrue(runtime._send_latest(geometry))
-        with patch("plate_ai.bbox_runtime.time.monotonic", return_value=10.04):
+        with patch("plate_ai.overlay.runtime.time.monotonic", return_value=10.04):
             self.assertFalse(runtime._send_latest(enriched))
-        with patch("plate_ai.bbox_runtime.time.monotonic", return_value=10.05):
+        with patch("plate_ai.overlay.runtime.time.monotonic", return_value=10.05):
             self.assertTrue(runtime._send_latest(next_frame))
         self.assertEqual([m["frame_sequence"] for m in sent], [1, 2])
-        with patch("plate_ai.bbox_runtime.time.monotonic", return_value=10.051):
+        with patch("plate_ai.overlay.runtime.time.monotonic", return_value=10.051):
             self.assertFalse(runtime._send_latest(replace(next_frame, count_in=2)))
 
     def test_boxes_are_available_before_slow_traffic_preview(self):
@@ -263,7 +263,7 @@ class PriorityTests(unittest.TestCase):
             time.sleep(.04)
             self.assertEqual(calls, [1])
             overlay = passages.latest_overlay(CAMERA.code)
-            with patch("plate_ai.bbox.time.monotonic", return_value=time.monotonic()+10):
+            with patch("plate_ai.overlay.schema.time.monotonic", return_value=time.monotonic()+10):
                 message = build_bbox_message(overlay, 1, BboxSettings(plate_max_age=.01))
             self.assertTrue(any(d.get("text") == "30A12345" for d in message["detections"]))
         finally:
@@ -313,7 +313,7 @@ class PriorityTests(unittest.TestCase):
         first_track = passages._states[CAMERA.code].visible[0]
         detection.emit(2, (other, CAR))
         passages._process_camera(CAMERA.code, config)
-        from plate_ai.recognition_runtime import RecognitionResult
+        from plate_ai.recognition.runtime import RecognitionResult
         read = VehicleRecognition(0, CAR, PlateRecognition("30A12345", .9), object_key=first_track.object_key)
         queued.append(RecognitionResult(CAMERA, 1, original.frame.captured_at,
                                        original.frame.received_monotonic, (read,), 20.))
@@ -408,7 +408,7 @@ class RecognitionSchedulingTests(unittest.TestCase):
         runtime, sync, detection, _ = self.make_runtime()
         runtime.pipeline.process.return_value = (VehicleRecognition(0, CAR, PlateRecognition("30A12345", .9)),)
         self.process(runtime, sync, detection, 1)
-        with patch("plate_ai.recognition_runtime.time.monotonic", return_value=time.monotonic()+10):
+        with patch("plate_ai.recognition.runtime.time.monotonic", return_value=time.monotonic()+10):
             result = runtime.drain(CAMERA.code)
         self.assertEqual(result[0].vehicles[0].license_plate.text, "30A12345")
         self.process(runtime, sync, detection, 2)
@@ -426,7 +426,7 @@ class RecognitionSchedulingTests(unittest.TestCase):
         runtime.pipeline.process.side_effect = process
         detection.emit(1, (CAR, CAR))
         clock[0] = detection.latest(CAMERA.code).frame.received_monotonic
-        with patch("plate_ai.recognition_runtime.time.monotonic", side_effect=lambda:clock[0]):
+        with patch("plate_ai.recognition.runtime.time.monotonic", side_effect=lambda:clock[0]):
             runtime._process_camera(CAMERA.code, sync.configs[0])
             results = runtime.drain(CAMERA.code)
         self.assertEqual([r.vehicles[0].object_key for r in results], ["track-1"])

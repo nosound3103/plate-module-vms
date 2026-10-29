@@ -5,8 +5,8 @@ import logging
 import signal
 import threading
 import time
-from .config import Settings
-from .service import CameraSyncService
+from plate_ai.core.config import Settings
+from plate_ai.camera.sync import CameraSyncService
 
 
 def main():
@@ -24,13 +24,13 @@ def main():
         delivery_settings = None
         tracking_enabled = False
         if args.mode == "detection":
-            from .detection_config import DetectionSettings
-            from .recognition_config import RecognitionSettings
-            from .passage_config import PassageSettings
-            from .bbox_config import BboxSettings
-            from .red_light_config import RedLightSettings
-            from .snapshot_config import SnapshotSettings
-            from .event_delivery import EventDeliverySettings
+            from plate_ai.detection.config import DetectionSettings
+            from plate_ai.recognition.config import RecognitionSettings
+            from plate_ai.tracking.config import PassageSettings
+            from plate_ai.overlay.config import BboxSettings
+            from plate_ai.traffic_light.config import RedLightSettings
+            from plate_ai.evidence.config import SnapshotSettings
+            from plate_ai.messaging.delivery import EventDeliverySettings
             detection_settings = DetectionSettings.from_env()
             recognition_settings = RecognitionSettings.from_env()
             passage_settings = PassageSettings.from_env()
@@ -65,7 +65,7 @@ def main():
         with ExitStack() as stack:
             sync = stack.enter_context(CameraSyncService(settings))
             if detection_settings is not None:
-                from .runtime import DetectionRuntime
+                from plate_ai.detection.runtime import DetectionRuntime
                 detection = stack.enter_context(DetectionRuntime(
                     sync, detection_settings,
                     metadata_frames=passage_settings.history_frames if tracking_enabled else 0,
@@ -74,23 +74,23 @@ def main():
                                         snapshot_settings.frame_buffer if snapshot_settings.enabled and passage_settings.enabled else 0)))
                 recognition = None
                 if recognition_settings.enabled:
-                    from .recognition_runtime import RecognitionRuntime
+                    from plate_ai.recognition.runtime import RecognitionRuntime
                     recognition = RecognitionRuntime(sync, detection, recognition_settings)
                 if tracking_enabled:
-                    from .passage_runtime import PassageRuntime
+                    from plate_ai.tracking.runtime import PassageRuntime
                     snapshots = None
                     red_snapshots = None
                     if ((snapshot_settings.enabled and (passage_settings.enabled or red_light_settings.enabled))
                             or (red_light_settings.enabled and red_light_settings.upload_snapshots)):
                         from dataclasses import replace
-                        from .snapshots import SnapshotService
+                        from plate_ai.evidence.storage import SnapshotService
                         storage = stack.enter_context(SnapshotService(settings.broker_host,
                                                                       replace(snapshot_settings, enabled=True)))
                         snapshots = storage if snapshot_settings.enabled else None
                         red_snapshots = storage if red_light_settings.enabled else None
                     publish = None
                     if passage_settings.enabled or red_light_settings.enabled:
-                        from .event_delivery import EventDelivery
+                        from plate_ai.messaging.delivery import EventDelivery
                         publish = stack.enter_context(EventDelivery(
                             delivery_settings, sync.transport.publish_plate_event,
                             sync.transport.publication_status,
@@ -108,7 +108,7 @@ def main():
                                                                  snapshots=snapshots, red_light_snapshots=red_snapshots,
                                                                  publish=publish))
                     if bbox_settings.enabled:
-                        from .bbox_runtime import BboxRuntime
+                        from plate_ai.overlay.runtime import BboxRuntime
                         stack.enter_context(BboxRuntime(sync, passages, bbox_settings))
                     if recognition is not None:
                         recognition.track_source = passages

@@ -24,7 +24,7 @@ class VehicleDetection:
 
 class YoloDetector:
     def __init__(self, settings, *, class_labels=None):
-        from .models import checkpoint
+        from plate_ai.models import checkpoint
         import torch
         self.settings = settings
         self.torch = torch
@@ -108,7 +108,7 @@ class VehicleDetector(YoloDetector):
     def __init__(self, settings):
         super().__init__(settings, class_labels=VEHICLE_TYPES)
         if settings.vehicle_engine:
-            from .tensorrt_runtime import TensorRTEngine
+            from plate_ai.detection.tensorrt import TensorRTEngine
             self.model = TensorRTEngine(settings.weights_dir/settings.vehicle_engine,
                                         settings.vehicle_engine_sha256, self.device, self.image_size,
                                         max(self.classes)+1)

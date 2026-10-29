@@ -2,7 +2,7 @@
 import logging
 import threading
 import time
-from .bbox import build_bbox_message
+from plate_ai.overlay.schema import build_bbox_message
 
 LOGGER = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ class BboxRuntime:
         self.sync, self.passages, self.settings = sync_service, passage_runtime, settings
         self.transport = None
         if publish is None:
-            from .bbox_mqtt import BboxMqttPublisher
+            from plate_ai.overlay.mqtt import BboxMqttPublisher
             self.transport = BboxMqttPublisher(sync_service.settings)
             publish = self.transport.publish
         self.publish = publish

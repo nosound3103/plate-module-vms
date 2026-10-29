@@ -5,10 +5,10 @@ from datetime import datetime, timedelta, timezone
 import logging
 import re
 import time
-from .events import build_plate_event
-from .red_light_config import RedLightSettings
-from .red_light_evidence import prepare_evidence, write_manifest, upload_evidence
-from .image_work import image_executor
+from plate_ai.messaging.events import build_plate_event
+from plate_ai.traffic_light.config import RedLightSettings
+from plate_ai.traffic_light.evidence import prepare_evidence, write_manifest, upload_evidence
+from plate_ai.evidence.worker import image_executor
 
 LOGGER = logging.getLogger(__name__)
 

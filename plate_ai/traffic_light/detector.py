@@ -4,7 +4,7 @@ import math
 import logging
 import cv2
 import numpy as np
-from .tracking import foot
+from plate_ai.tracking.tracker import foot
 
 COLORS = {"RED": (0, 0, 255), "GREEN": (0, 255, 0),
           "YELLOW": (0, 255, 255), "UNKNOWN": (128, 128, 128)}

@@ -6,8 +6,8 @@ import unittest
 import numpy as np
 import torch
 
-from plate_ai.detection import VehicleDetector
-from plate_ai.detection_config import DetectionSettings
+from plate_ai.detection.detector import VehicleDetector
+from plate_ai.detection.config import DetectionSettings
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -16,6 +16,18 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(settings.device, "cpu")
         self.assertEqual(settings.max_fps, 5.)
         self.assertEqual(settings.confidence, .4)
+
+    def test_default_weight_location_and_public_package_api_survive_module_move(self):
+        import plate_ai
+        from plate_ai.camera.sync import CameraSyncService, CameraConfiguration
+        from plate_ai.core.config import Settings
+        expected = Path(__file__).resolve().parents[1]/"models"/"weights"
+        self.assertEqual(DetectionSettings().weights_dir, expected)
+        self.assertEqual(DetectionSettings.from_env({}).weights_dir, expected)
+        self.assertIs(plate_ai.Settings, Settings)
+        self.assertIs(plate_ai.CameraSyncService, CameraSyncService)
+        self.assertIs(plate_ai.CameraConfiguration, CameraConfiguration)
+        self.assertIs(plate_ai.DetectionSettings, DetectionSettings)
 
     def test_explicit_device_and_thresholds(self):
         settings = DetectionSettings.from_env({"PLATE_DEVICE": "cuda:0", "PLATE_MAX_FPS": "8",
@@ -98,7 +110,7 @@ class InferenceTests(unittest.TestCase):
 class ModelSmokeTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("PLATE_VEHICLE_ENGINE") and torch.cuda.is_available(), "TensorRT engine is not configured")
     def test_configured_engine_cuda_forward(self):
-        from plate_ai.tensorrt_runtime import TensorRTEngine
+        from plate_ai.detection.tensorrt import TensorRTEngine
         detector = VehicleDetector(DetectionSettings.from_env())
         self.assertIsInstance(detector.model, TensorRTEngine)
         self.assertTrue(detector.square_input)

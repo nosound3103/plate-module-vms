@@ -16,7 +16,9 @@ COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt_cu12_bindi
 COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/tensorrt_cu12_libs-10.13.3.9.post1.dist-info /app/.venv/lib/python3.12/site-packages/tensorrt_cu12_libs-10.13.3.9.post1.dist-info
 COPY --from=tensorrt /app/.venv/lib/python3.12/site-packages/cuda_toolkit-12.9.2.0.dist-info /app/.venv/lib/python3.12/site-packages/cuda_toolkit-12.9.2.0.dist-info
 RUN /app/.venv/bin/python -c "import tensorrt; assert tensorrt.__version__.startswith('10.13.3.9')" \
-    && uv pip check --python /app/.venv/bin/python
+    && uv pip check --python /app/.venv/bin/python \
+    && rm -rf /opt/plate/plate_ai
+# Replace inherited source completely so removed/relocated modules cannot linger.
 COPY --chown=plate:plate plate_ai ./plate_ai
 USER plate
 ENTRYPOINT []

@@ -3,8 +3,8 @@ from dataclasses import dataclass, replace
 import hashlib
 import logging
 import re
-from .detection import VehicleDetection, YoloDetector
-from .domain import Zone
+from plate_ai.detection.detector import VehicleDetection, YoloDetector
+from plate_ai.core.domain import Zone
 
 LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def order_characters(detections, shape):
 
 class AttributeClassifier:
     def __init__(self, detection_settings, artifact, confidence):
-        from .models import checkpoint
+        from plate_ai.models import checkpoint
         import torch
         path = detection_settings.weights_dir/artifact.filename
         with path.open("rb") as handle:

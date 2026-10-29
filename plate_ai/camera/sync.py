@@ -5,7 +5,7 @@ import logging
 import queue
 import threading
 import time
-from .domain import Camera, Zone, CrossingLine, TrafficZone, ZoneStore
+from plate_ai.core.domain import Camera, Zone, CrossingLine, TrafficZone, ZoneStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class CameraSyncService:
     def __init__(self, settings, *, transport=None):
         self.settings = settings
         if transport is None:
-            from .mqtt import MqttTransport
+            from plate_ai.messaging.mqtt import MqttTransport
             transport = MqttTransport(settings)
         self.transport = transport
         self._snapshots = {}

@@ -30,14 +30,14 @@ def image_executor():
 def encode_snapshot(frame, quality, local_dir=None, annotation=None):
     import cv2
     if local_dir:
-        from .snapshots import save_original
+        from plate_ai.evidence.storage import save_original
         try:
             save_original(frame, local_dir)
         except Exception as error:
             import logging
             logging.getLogger(__name__).warning("Snapshot result=LOCAL_SAVE_FAILED type=%s", type(error).__name__)
     if annotation is not None:
-        from .passage_evidence import annotate_passage
+        from plate_ai.evidence.passage import annotate_passage
         frame = annotate_passage(frame, annotation)
     ok, image = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:

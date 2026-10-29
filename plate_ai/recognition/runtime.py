@@ -4,8 +4,8 @@ from dataclasses import dataclass, replace
 import logging
 import threading
 import time
-from .domain import Camera
-from .recognition import RecognitionPipeline, VehicleRecognition
+from plate_ai.core.domain import Camera
+from plate_ai.recognition.pipeline import RecognitionPipeline, VehicleRecognition
 
 LOGGER = logging.getLogger(__name__)
 

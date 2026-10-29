@@ -2,7 +2,7 @@
 import json
 import logging
 import threading
-from .mqtt import create_client
+from plate_ai.messaging.mqtt import create_client
 
 LOGGER = logging.getLogger(__name__)
 

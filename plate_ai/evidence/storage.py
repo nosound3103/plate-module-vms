@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 import cv2
-from .image_work import image_executor, encode_snapshot
+from plate_ai.evidence.worker import image_executor, encode_snapshot
 
 LOGGER = logging.getLogger(__name__)
 
